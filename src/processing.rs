@@ -21,6 +21,11 @@ pub struct ProcessedFit {
     pub processed_bytes: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ProcessingOptions {
+    pub remove_speed_fields: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ParsedFit {
     pub header_without_crc: Vec<u8>,
@@ -46,10 +51,13 @@ impl fmt::Display for FitProcessError {
 
 impl std::error::Error for FitProcessError {}
 
-pub fn process_fit_bytes(bytes: &[u8]) -> Result<ProcessedFit, FitProcessError> {
+pub fn process_fit_bytes(
+    bytes: &[u8],
+    options: &ProcessingOptions,
+) -> Result<ProcessedFit, FitProcessError> {
     let parsed = parse_fit(bytes)?;
 
-    let display_records = parsed
+    let filtered_records = parsed
         .records
         .clone()
         .into_iter()
@@ -58,6 +66,7 @@ pub fn process_fit_bytes(bytes: &[u8]) -> Result<ProcessedFit, FitProcessError> 
             fields: record
                 .fields()
                 .iter()
+                .filter(|field| !should_skip_field(field.name(), options))
                 .map(|field| DisplayField {
                     name: field.name().to_string(),
                     value: field.to_string(),
@@ -66,10 +75,14 @@ pub fn process_fit_bytes(bytes: &[u8]) -> Result<ProcessedFit, FitProcessError> 
         })
         .collect();
 
-    let processed_bytes = reencode_fit(&parsed)?;
+    let processed_bytes = if options.remove_speed_fields {
+        reencode_fit_with_section(&parsed, Vec::new())?
+    } else {
+        reencode_fit_with_section(&parsed, parsed.data_section.clone())?
+    };
 
     Ok(ProcessedFit {
-        records: display_records,
+        records: filtered_records,
         processed_bytes,
     })
 }
@@ -142,12 +155,26 @@ pub fn parse_fit(bytes: &[u8]) -> Result<ParsedFit, FitProcessError> {
     })
 }
 
-pub fn reencode_fit(parsed: &ParsedFit) -> Result<Vec<u8>, FitProcessError> {
+fn reencode_fit_with_section(
+    parsed: &ParsedFit,
+    data_section: Vec<u8>,
+) -> Result<Vec<u8>, FitProcessError> {
     if parsed.header_without_crc.is_empty() {
         return Err(FitProcessError::InvalidHeader("missing header byte".into()));
     }
 
-    let mut rebuilt = parsed.header_without_crc.clone();
+    let mut header_without_crc = parsed.header_without_crc.clone();
+
+    // Update data size in header to reflect the new data payload if possible
+    if header_without_crc.len() >= 8 {
+        let data_len: u32 = data_section
+            .len()
+            .try_into()
+            .map_err(|_| FitProcessError::InvalidHeader("data section too large".into()))?;
+        header_without_crc[4..8].copy_from_slice(&data_len.to_le_bytes());
+    }
+
+    let mut rebuilt = header_without_crc.clone();
     let mut crc_input = rebuilt.clone();
 
     if parsed.has_header_crc {
@@ -156,8 +183,8 @@ pub fn reencode_fit(parsed: &ParsedFit) -> Result<Vec<u8>, FitProcessError> {
         crc_input.extend_from_slice(&header_crc.to_le_bytes());
     }
 
-    crc_input.extend_from_slice(&parsed.data_section);
-    rebuilt.extend_from_slice(&parsed.data_section);
+    crc_input.extend_from_slice(&data_section);
+    rebuilt.extend_from_slice(&data_section);
 
     let data_crc = calculate_crc(&crc_input);
     rebuilt.extend_from_slice(&data_crc.to_le_bytes());
@@ -179,4 +206,12 @@ fn calculate_crc(data: &[u8]) -> u16 {
         crc = (crc >> 4) & 0x0FFF;
         crc ^ tmp ^ CRC_TABLE[((byte >> 4) & 0xF) as usize]
     })
+}
+
+fn should_skip_field(field_name: &str, options: &ProcessingOptions) -> bool {
+    if !options.remove_speed_fields {
+        return false;
+    }
+
+    matches!(field_name, "speed" | "enhanced_speed")
 }

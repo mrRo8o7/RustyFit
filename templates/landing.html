@@ -17,12 +17,16 @@
     .records { margin-top: 1.5rem; }
     table { border-collapse: collapse; width: 100%; background: white; }
     th, td { padding: 0.5rem; border: 1px solid #e5e7eb; text-align: left; }
+    .options { margin: 1rem 0; }
   </style>
 </head>
 <body>
   <header><h1>RustyFit MVP</h1></header>
   <main>
     <p>Upload a FIT file to begin preprocessing.</p>
+    <div class="options">
+      <label><input type="checkbox" id="remove-speed" /> Remove speed fields</label>
+    </div>
     <div id="drop-zone" class="drop-zone">
       <p>Drag & drop your FIT file here, or click to select.</p>
       <input id="file-input" type="file" accept=".fit" style="display:none" />
@@ -37,6 +41,7 @@
     const selectBtn = document.getElementById('select-btn');
     const statusEl = document.getElementById('status');
     const resultsEl = document.getElementById('results');
+    const removeSpeedCheckbox = document.getElementById('remove-speed');
 
     const preventDefaults = (e) => { e.preventDefault(); e.stopPropagation(); };
     ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
@@ -64,6 +69,7 @@
       }
       const formData = new FormData();
       formData.append('file', files[0]);
+      formData.append('remove_speed_fields', removeSpeedCheckbox.checked ? 'true' : 'false');
       statusEl.textContent = 'Uploading...';
       resultsEl.innerHTML = '';
       try {
