@@ -3,6 +3,9 @@ name = "RustyFit"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "rustyfit"
+
 [dependencies]
 axum = { version = "0.7", features = ["multipart"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
@@ -10,6 +13,8 @@ http-body-util = "0.1"
 tower = { version = "0.4", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+fitparser = "0.10"
+base64 = "0.22"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }

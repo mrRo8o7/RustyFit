@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RustyFit</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f7f7f7; }
+    header { background: #20232a; color: white; padding: 1rem 2rem; }
+    main { padding: 2rem; max-width: 960px; margin: 0 auto; }
+    .drop-zone { border: 2px dashed #888; padding: 2rem; background: white; text-align: center; }
+    .drop-zone.drag { border-color: #2563eb; background: #eff6ff; }
+    .status { margin-top: 1rem; }
+    button { background: #2563eb; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 4px; cursor: pointer; }
+    button:hover { background: #1d4ed8; }
+    .error { color: #b91c1c; font-weight: bold; }
+    .records { margin-top: 1.5rem; }
+    table { border-collapse: collapse; width: 100%; background: white; }
+    th, td { padding: 0.5rem; border: 1px solid #e5e7eb; text-align: left; }
+  </style>
+</head>
+<body>
+  <header><h1>RustyFit MVP</h1></header>
+  <main>
+    <p>Upload a FIT file to begin preprocessing.</p>
+    <div id="drop-zone" class="drop-zone">
+      <p>Drag & drop your FIT file here, or click to select.</p>
+      <input id="file-input" type="file" accept=".fit" style="display:none" />
+      <button id="select-btn" type="button">Choose a file</button>
+    </div>
+    <div class="status" id="status"></div>
+    <div id="results" class="records"></div>
+  </main>
+  <script>
+    const dropZone = document.getElementById('drop-zone');
+    const fileInput = document.getElementById('file-input');
+    const selectBtn = document.getElementById('select-btn');
+    const statusEl = document.getElementById('status');
+    const resultsEl = document.getElementById('results');
+
+    const preventDefaults = (e) => { e.preventDefault(); e.stopPropagation(); };
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+      dropZone.addEventListener(eventName, preventDefaults, false);
+      document.body.addEventListener(eventName, preventDefaults, false);
+    });
+
+    ['dragenter', 'dragover'].forEach(eventName => {
+      dropZone.addEventListener(eventName, () => dropZone.classList.add('drag'), false);
+    });
+    ['dragleave', 'drop'].forEach(eventName => {
+      dropZone.addEventListener(eventName, () => dropZone.classList.remove('drag'), false);
+    });
+
+    dropZone.addEventListener('click', () => fileInput.click());
+    selectBtn.addEventListener('click', () => fileInput.click());
+
+    dropZone.addEventListener('drop', handleFiles);
+    fileInput.addEventListener('change', (e) => handleFiles({ dataTransfer: { files: e.target.files } }));
+
+    async function handleFiles(e) {
+      const files = e.dataTransfer.files;
+      if (!files || files.length === 0) {
+        return;
+      }
+      const formData = new FormData();
+      formData.append('file', files[0]);
+      statusEl.textContent = 'Uploading...';
+      resultsEl.innerHTML = '';
+      try {
+        const response = await fetch('/upload', { method: 'POST', body: formData });
+        const message = await response.text();
+        if (response.ok) {
+          statusEl.textContent = 'Processed successfully';
+          resultsEl.innerHTML = message;
+        } else {
+          statusEl.innerHTML = '<span class="error">Upload failed: ' + message + '</span>';
+        }
+      } catch (err) {
+        statusEl.innerHTML = '<span class="error">Upload failed: ' + err + '</span>';
+      }
+    }
+  </script>
+</body>
+</html>
