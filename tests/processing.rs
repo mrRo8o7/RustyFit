@@ -1,8 +1,114 @@
-use rustyfit::processing::process_fit_bytes;
+use fitparser::from_bytes;
+use rustyfit::processing::{ProcessingOptions, process_fit_bytes};
 
 #[test]
 fn round_trip_returns_identical_bytes() {
     let bytes = std::fs::read("tests/fixtures/activity.fit").expect("fixture should be present");
-    let processed = process_fit_bytes(&bytes).expect("processing should succeed");
+    let processed = process_fit_bytes(&bytes, &ProcessingOptions::default())
+        .expect("processing should succeed");
     assert_eq!(processed.processed_bytes, bytes);
+}
+
+#[test]
+fn speed_fields_can_be_removed_from_display_records() {
+    let bytes = std::fs::read("tests/fixtures/activity.fit").expect("fixture should be present");
+
+    let default_processed = process_fit_bytes(&bytes, &ProcessingOptions::default())
+        .expect("processing should succeed");
+    assert!(
+        default_processed
+            .records
+            .iter()
+            .flat_map(|record| &record.fields)
+            .any(|field| field.name == "speed" || field.name == "enhanced_speed")
+    );
+
+    let processed = process_fit_bytes(
+        &bytes,
+        &ProcessingOptions {
+            remove_speed_fields: true,
+        },
+    )
+    .expect("processing should succeed");
+
+    assert!(
+        !processed
+            .records
+            .iter()
+            .flat_map(|record| &record.fields)
+            .any(|field| field.name == "speed" || field.name == "enhanced_speed")
+    );
+
+    // The processed bytes should also encode the filtered output so a subsequent parse
+    // does not surface speed fields again.
+    let downloaded_round = process_fit_bytes(&processed.processed_bytes, &ProcessingOptions::default())
+        .expect("processed file should remain decodable");
+
+    assert_eq!(downloaded_round.records.len(), processed.records.len());
+    assert!(downloaded_round.records.iter().any(|record| !record.fields.is_empty()));
+
+    assert!(
+        !downloaded_round
+            .records
+            .iter()
+            .flat_map(|record| &record.fields)
+            .any(|field| field.name == "speed" || field.name == "enhanced_speed")
+    );
+}
+
+#[test]
+fn filtered_download_preserves_non_speed_fields() {
+    let bytes = std::fs::read("tests/fixtures/activity.fit").expect("fixture should be present");
+
+    let original = process_fit_bytes(&bytes, &ProcessingOptions::default())
+        .expect("baseline processing should succeed");
+
+    let original_record_count = original
+        .records
+        .iter()
+        .filter(|record| record.message_type.contains("Record"))
+        .count();
+
+    let processed = process_fit_bytes(
+        &bytes,
+        &ProcessingOptions {
+            remove_speed_fields: true,
+        },
+    )
+    .expect("filtered processing should succeed");
+
+    let reparsed = process_fit_bytes(&processed.processed_bytes, &ProcessingOptions::default())
+        .expect("re-processed file should decode");
+
+    let field_names: std::collections::HashSet<_> = reparsed
+        .records
+        .iter()
+        .flat_map(|record| record.fields.iter().map(|field| field.name.clone()))
+        .collect();
+
+    let record_count = reparsed
+        .records
+        .iter()
+        .filter(|record| record.message_type.contains("Record"))
+        .count();
+
+    assert_eq!(reparsed.records.len(), original.records.len());
+    assert_eq!(record_count, original_record_count);
+    assert!(field_names.contains("distance"));
+}
+
+#[test]
+fn filtered_download_keeps_crc_valid() {
+    let bytes = std::fs::read("tests/fixtures/activity.fit").expect("fixture should be present");
+
+    let processed = process_fit_bytes(
+        &bytes,
+        &ProcessingOptions {
+            remove_speed_fields: true,
+        },
+    )
+    .expect("processing should succeed");
+
+    // Decoding without skipping CRC validation should succeed if we updated the header and data CRC.
+    from_bytes(&processed.processed_bytes).expect("processed FIT bytes should have valid CRC");
 }
