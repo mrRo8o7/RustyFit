@@ -1,3 +1,4 @@
+use fitparser::profile::MesgNum;
 use fitparser::FitDataRecord;
 use fitparser::de::{DecodeOption, from_bytes_with_options};
 use std::collections::HashSet;
@@ -75,11 +76,13 @@ pub fn process_fit_bytes(
         })
         .collect();
 
-    let processed_bytes = if options.remove_speed_fields {
-        reencode_fit_with_section(&parsed, Vec::new())?
+    let processed_data_section = if options.remove_speed_fields {
+        filter_data_section(&parsed.data_section, options)?
     } else {
-        reencode_fit_with_section(&parsed, parsed.data_section.clone())?
+        parsed.data_section.clone()
     };
+
+    let processed_bytes = reencode_fit_with_section(&parsed, processed_data_section)?;
 
     Ok(ProcessedFit {
         records: filtered_records,
@@ -190,6 +193,215 @@ fn reencode_fit_with_section(
     rebuilt.extend_from_slice(&data_crc.to_le_bytes());
 
     Ok(rebuilt)
+}
+
+#[derive(Clone, Debug)]
+struct FieldDefinition {
+    number: u8,
+    size: u8,
+    base_type: u8,
+}
+
+#[derive(Clone, Debug)]
+struct DeveloperFieldDefinition {
+    number: u8,
+    size: u8,
+    developer_index: u8,
+}
+
+#[derive(Clone, Debug)]
+struct MessageDefinition {
+    global_mesg_num: u16,
+    fields: Vec<FieldDefinition>,
+    filtered_fields: Vec<FieldDefinition>,
+    developer_fields: Vec<DeveloperFieldDefinition>,
+}
+
+fn filter_data_section(
+    data_section: &[u8],
+    options: &ProcessingOptions,
+) -> Result<Vec<u8>, FitProcessError> {
+    let mut offset = 0usize;
+    let mut definitions: std::collections::HashMap<u8, MessageDefinition> =
+        std::collections::HashMap::new();
+    let mut filtered: Vec<u8> = Vec::with_capacity(data_section.len());
+
+    while offset < data_section.len() {
+        let message_start = offset;
+        let header = data_section
+            .get(offset)
+            .copied()
+            .ok_or_else(|| FitProcessError::InvalidHeader("unexpected end of data".into()))?;
+        offset += 1;
+
+        if header & 0x80 != 0 {
+            return Err(FitProcessError::ParseError(
+                "compressed timestamp headers are not supported".into(),
+            ));
+        }
+
+        let is_definition = header & 0x40 != 0;
+        let has_developer_data = header & 0x20 != 0;
+        let local_message_num = header & 0x0F;
+
+        if is_definition {
+            if offset + 5 > data_section.len() {
+                return Err(FitProcessError::InvalidHeader(
+                    "definition message truncated".into(),
+                ));
+            }
+
+            let reserved = data_section[offset];
+            let architecture = data_section[offset + 1];
+            let global_mesg_num_bytes = [data_section[offset + 2], data_section[offset + 3]];
+            let global_mesg_num = if architecture == 0 {
+                u16::from_le_bytes(global_mesg_num_bytes)
+            } else {
+                u16::from_be_bytes(global_mesg_num_bytes)
+            };
+            let num_fields = data_section[offset + 4] as usize;
+            offset += 5;
+
+            let mut fields = Vec::with_capacity(num_fields);
+            for _ in 0..num_fields {
+                if offset + 3 > data_section.len() {
+                    return Err(FitProcessError::InvalidHeader(
+                        "field definition truncated".into(),
+                    ));
+                }
+                fields.push(FieldDefinition {
+                    number: data_section[offset],
+                    size: data_section[offset + 1],
+                    base_type: data_section[offset + 2],
+                });
+                offset += 3;
+            }
+
+            let mut developer_fields = Vec::new();
+            if has_developer_data {
+                let dev_count = *data_section
+                    .get(offset)
+                    .ok_or_else(|| FitProcessError::InvalidHeader("missing developer count".into()))?
+                    as usize;
+                offset += 1;
+
+                developer_fields = Vec::with_capacity(dev_count);
+                for _ in 0..dev_count {
+                    if offset + 3 > data_section.len() {
+                        return Err(FitProcessError::InvalidHeader(
+                            "developer field truncated".into(),
+                        ));
+                    }
+                    developer_fields.push(DeveloperFieldDefinition {
+                        number: data_section[offset],
+                        size: data_section[offset + 1],
+                        developer_index: data_section[offset + 2],
+                    });
+                    offset += 3;
+                }
+            }
+
+            let filtered_fields = if options.remove_speed_fields
+                && global_mesg_num == MesgNum::Record.as_u16()
+            {
+                fields
+                    .iter()
+                    .filter(|field| !matches!(field.number, 6 | 73))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                fields.clone()
+            };
+
+            definitions.insert(
+                local_message_num,
+                MessageDefinition {
+                    global_mesg_num,
+                    fields,
+                    filtered_fields: filtered_fields.clone(),
+                    developer_fields: developer_fields.clone(),
+                },
+            );
+
+            if filtered_fields.len()
+                == definitions
+                    .get(&local_message_num)
+                    .map(|def| def.fields.len())
+                    .unwrap_or(0)
+            {
+                // No change: reuse the original bytes for this definition message.
+                filtered.extend_from_slice(&data_section[message_start..offset]);
+                continue;
+            }
+
+            // Rebuild definition message without the excluded fields.
+            filtered.push(header);
+            filtered.push(reserved);
+            filtered.push(architecture);
+            if architecture == 0 {
+                filtered.extend_from_slice(&global_mesg_num.to_le_bytes());
+            } else {
+                filtered.extend_from_slice(&global_mesg_num.to_be_bytes());
+            }
+            filtered.push(filtered_fields.len() as u8);
+
+            for field in &filtered_fields {
+                filtered.push(field.number);
+                filtered.push(field.size);
+                filtered.push(field.base_type);
+            }
+
+            if has_developer_data {
+                filtered.push(developer_fields.len() as u8);
+                for dev in &developer_fields {
+                    filtered.push(dev.number);
+                    filtered.push(dev.size);
+                    filtered.push(dev.developer_index);
+                }
+            }
+        } else {
+            let definition = definitions.get(&local_message_num).ok_or_else(|| {
+                FitProcessError::InvalidHeader("data message missing preceding definition".into())
+            })?;
+
+            let mut filtered_message =
+                Vec::with_capacity(1 + definition.filtered_fields.len() * 3 + definition.developer_fields.len() * 3);
+            filtered_message.push(header);
+
+            for field in &definition.fields {
+                let field_size = field.size as usize;
+                if offset + field_size > data_section.len() {
+                    return Err(FitProcessError::InvalidHeader(
+                        "data message truncated".into(),
+                    ));
+                }
+                let field_bytes = &data_section[offset..offset + field_size];
+                if !(options.remove_speed_fields
+                    && definition.global_mesg_num == MesgNum::Record.as_u16()
+                    && matches!(field.number, 6 | 73))
+                {
+                    filtered_message.extend_from_slice(field_bytes);
+                }
+                offset += field_size;
+            }
+
+            for dev_field in &definition.developer_fields {
+                let field_size = dev_field.size as usize;
+                if offset + field_size > data_section.len() {
+                    return Err(FitProcessError::InvalidHeader(
+                        "developer data message truncated".into(),
+                    ));
+                }
+                let field_bytes = &data_section[offset..offset + field_size];
+                filtered_message.extend_from_slice(field_bytes);
+                offset += field_size;
+            }
+
+            filtered.extend_from_slice(&filtered_message);
+        }
+    }
+
+    Ok(filtered)
 }
 
 fn calculate_crc(data: &[u8]) -> u16 {
