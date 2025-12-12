@@ -2,7 +2,7 @@
 
 RustyFit is a Rust-based web app for preprocessing FIT activity files – clean, validate, merge, and export your fitness data with ease.
 
-This repository currently contains a minimal viable product built with the **Axum** web framework. It provides a simple landing page with a drag-and-drop FIT file uploader and a stub upload endpoint, ready to expand with validation and preprocessing logic.
+The current Axum server lets you upload a FIT file, renders the decoded records in the browser, and (optionally) strips speed-related fields before returning a rebuilt FIT payload.
 
 ## Prerequisites
 - Rust toolchain (edition 2024)
@@ -19,7 +19,31 @@ cargo test
 ```
 The initial tests verify that the landing page responds and that the upload endpoint rejects requests without a file.
 
-## Next steps
-- Extend the upload handler to parse and validate FIT files.
-- Add persistence for uploaded files and processed results.
-- Flesh out the UI with progress indicators and results views.
+## How FIT files are parsed and rewritten
+
+The FIT protocol stores binary data with a small header, a stream of definition and data messages, and a trailing CRC. RustyFit uses [`fitparser`](https://docs.rs/fitparser/latest/fitparser/) to decode the stream for display, and hand-written utilities in [`src/processing.rs`](src/processing.rs) to keep the on-disk structure valid when fields are removed.
+
+```
++--------------------------- FIT file ----------------------------+
+| Header (size byte, data size, profile/version, optional CRC)    |
++-----------------------------------------------------------------+
+| Message stream (definition + data messages)                     |
+|   ├─ Definition #0: fields + types + base sizes                 |
+|   ├─ Data #0 instances, matching Definition #0 layout           |
+|   ├─ Definition #1: same structure but with its own field set   |
+|   ├─ Data #1 instances, matching Definition #1 layout           |
+|   └─ ... (alternating definitions and data records)             |
++-----------------------------------------------------------------+
+| File CRC (2 bytes)                                              |
++-----------------------------------------------------------------+
+```
+
+1. `parse_fit` enforces basic FIT layout: the first byte declares the header size, the next four bytes declare the data payload length, and the file ends with a two-byte CRC. CRC validation is skipped so we can safely alter the payload.
+2. The parsed `FitDataRecord`s are converted into human-readable `DisplayRecord`s for the UI.
+3. When the "Remove speed fields" option is enabled, the data stream is walked byte-by-byte. For each message definition RustyFit rebuilds the definition without `speed` and `enhanced_speed` fields and then rewrites subsequent data messages to match the new layout.
+4. `reencode_fit_with_section` stitches the updated data payload back onto the original header, adjusts the declared data length, and recalculates the CRC over the combined header and data bytes.
+
+Reading through `processing.rs` alongside a FIT specification (or the links below) is the quickest way to understand the project’s handling of the format.
+
+### Additional FIT references
+- [FIT SDK documentation](https://developer.garmin.com/fit/protocol/) for the canonical file layout and message types.

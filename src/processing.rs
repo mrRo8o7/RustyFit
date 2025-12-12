@@ -1,32 +1,56 @@
+//! Helpers for parsing, filtering, and re-encoding FIT files.
+//!
+//! The implementation mirrors the official FIT file layout:
+//!
+//! * A header whose first byte declares its own size, followed by a 4-byte
+//!   data payload length and (optionally) a two-byte CRC for the header.
+//! * A data section containing a stream of message definition records and data
+//!   records. Data records are keyed by the "local message number" declared in
+//!   the most recent definition record with the same local ID.
+//! * A trailing two-byte CRC that covers the header (including its CRC when
+//!   present) plus the entire data section.
+//!
+//! The functions in this module decode the bytes into the `fitparser` model so
+//! the web UI can render human-readable fields, optionally remove speed-related
+//! fields, and finally re-encode the data with an updated header and CRCs.
+
 use fitparser::profile::MesgNum;
 use fitparser::FitDataRecord;
 use fitparser::de::{DecodeOption, from_bytes_with_options};
 use std::collections::HashSet;
 use std::fmt;
 
+/// Simplified representation of a FIT field for display in the UI.
 #[derive(Debug, Clone)]
 pub struct DisplayField {
     pub name: String,
     pub value: String,
 }
 
+/// Human-readable wrapper around a parsed FIT data record.
 #[derive(Debug, Clone)]
 pub struct DisplayRecord {
     pub message_type: String,
     pub fields: Vec<DisplayField>,
 }
 
+/// Processed FIT output returned to the web handler.
 #[derive(Debug, Clone)]
 pub struct ProcessedFit {
+    /// Fields formatted for rendering.
     pub records: Vec<DisplayRecord>,
+    /// Re-encoded FIT payload, optionally with filtered data fields.
     pub processed_bytes: Vec<u8>,
 }
 
+/// User-facing toggles that adjust how FIT bytes are rewritten.
 #[derive(Debug, Clone, Default)]
 pub struct ProcessingOptions {
+    /// Drop `speed` and `enhanced_speed` fields from record messages.
     pub remove_speed_fields: bool,
 }
 
+/// Decomposed pieces of the original FIT file used for later reconstruction.
 #[derive(Debug, Clone)]
 pub struct ParsedFit {
     pub header_without_crc: Vec<u8>,
@@ -52,6 +76,15 @@ impl fmt::Display for FitProcessError {
 
 impl std::error::Error for FitProcessError {}
 
+/// Decode a FIT payload, optionally filter speed fields, and re-encode.
+///
+/// The function performs three stages:
+/// 1. [`parse_fit`] splits the payload into header, data section, and parsed
+///    `fitparser` records.
+/// 2. The parsed records are converted into a format suitable for HTML output
+///    and filtered based on [`ProcessingOptions`].
+/// 3. The data section is optionally rewritten without speed fields and the
+///    file is reconstructed via [`reencode_fit_with_section`].
 pub fn process_fit_bytes(
     bytes: &[u8],
     options: &ProcessingOptions,
@@ -90,6 +123,13 @@ pub fn process_fit_bytes(
     })
 }
 
+/// Parse a raw FIT file into its component parts without failing on CRCs.
+///
+/// The official FIT structure is enforced here: the header length must be at
+/// least 12 bytes, the declared data length must match the payload present, and
+/// the file must be long enough to include the final two-byte CRC. CRC values
+/// are **not** verified because the caller may intentionally alter the bytes
+/// before re-encoding.
 pub fn parse_fit(bytes: &[u8]) -> Result<ParsedFit, FitProcessError> {
     let header_size = *bytes
         .first()
@@ -140,6 +180,9 @@ pub fn parse_fit(bytes: &[u8]) -> Result<ParsedFit, FitProcessError> {
 
     let data_section = bytes[data_start..data_end].to_vec();
 
+    // CRC is recomputed later when we rebuild the payload, so we intentionally
+    // skip validation during parsing to allow working with partially modified
+    // files.
     let decode_options: HashSet<DecodeOption> = [
         DecodeOption::SkipHeaderCrcValidation,
         DecodeOption::SkipDataCrcValidation,
@@ -158,6 +201,10 @@ pub fn parse_fit(bytes: &[u8]) -> Result<ParsedFit, FitProcessError> {
     })
 }
 
+/// Rebuild a FIT file by combining the original header with a new data section.
+///
+/// The function updates the header's declared data length when possible and
+/// recalculates CRCs for both header (when present) and data payload.
 fn reencode_fit_with_section(
     parsed: &ParsedFit,
     data_section: Vec<u8>,
@@ -217,6 +264,14 @@ struct MessageDefinition {
     developer_fields: Vec<DeveloperFieldDefinition>,
 }
 
+/// Remove selected fields from the data section while keeping FIT framing valid.
+///
+/// The FIT data stream alternates between definition messages (which describe
+/// the layout of subsequent data messages for a local message number) and data
+/// messages (which contain values following the last definition). When a field
+/// is removed we must rebuild both the definition and the matching data
+/// messages so that offsets remain correct and decoders can still read the
+/// payload.
 fn filter_data_section(
     data_section: &[u8],
     options: &ProcessingOptions,
@@ -404,6 +459,7 @@ fn filter_data_section(
     Ok(filtered)
 }
 
+/// Compute the standard FIT CRC-16 using the Garmin nibble lookup table.
 fn calculate_crc(data: &[u8]) -> u16 {
     const CRC_TABLE: [u16; 16] = [
         0x0000, 0xCC01, 0xD801, 0x1400, 0xF001, 0x3C00, 0x2800, 0xE401, 0xA001, 0x6C00, 0x7800,
