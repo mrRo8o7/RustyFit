@@ -14,9 +14,9 @@
 //! the web UI can render human-readable fields, optionally remove speed-related
 //! fields, and finally re-encode the data with an updated header and CRCs.
 
-use fitparser::profile::MesgNum;
 use fitparser::FitDataRecord;
 use fitparser::de::{DecodeOption, from_bytes_with_options};
+use fitparser::profile::MesgNum;
 use std::collections::HashSet;
 use std::fmt;
 
@@ -41,6 +41,8 @@ pub struct ProcessedFit {
     pub records: Vec<DisplayRecord>,
     /// Re-encoded FIT payload, optionally with filtered data fields.
     pub processed_bytes: Vec<u8>,
+    /// Summary metrics extracted from the FIT payload.
+    pub summary: WorkoutSummary,
 }
 
 /// User-facing toggles that adjust how FIT bytes are rewritten.
@@ -90,6 +92,7 @@ pub fn process_fit_bytes(
     options: &ProcessingOptions,
 ) -> Result<ProcessedFit, FitProcessError> {
     let parsed = parse_fit(bytes)?;
+    let summary = summarize_workout(&parsed.records);
 
     let filtered_records = parsed
         .records
@@ -120,7 +123,113 @@ pub fn process_fit_bytes(
     Ok(ProcessedFit {
         records: filtered_records,
         processed_bytes,
+        summary,
     })
+}
+
+/// Derived overview metrics from the FIT records.
+#[derive(Debug, Clone, Default)]
+pub struct WorkoutSummary {
+    pub duration_seconds: Option<f64>,
+    pub workout_type: Option<String>,
+    pub distance_meters: Option<f64>,
+    pub speed_min: Option<f64>,
+    pub speed_mean: Option<f64>,
+    pub speed_max: Option<f64>,
+}
+
+fn summarize_workout(records: &[FitDataRecord]) -> WorkoutSummary {
+    use std::convert::TryInto;
+
+    let mut timestamps: Vec<f64> = Vec::new();
+    let mut workout_type: Option<String> = None;
+    let mut distance_samples: Vec<(f64, f64)> = Vec::new();
+
+    for record in records {
+        let mut timestamp: Option<f64> = None;
+        let mut distance: Option<f64> = None;
+
+        for field in record.fields() {
+            match field.name() {
+                "timestamp" => {
+                    if let Ok(value) = field.value().clone().try_into() {
+                        timestamp = Some(value);
+                        timestamps.push(value);
+                    }
+                }
+                "distance" => {
+                    if let Ok(value) = field.value().clone().try_into() {
+                        distance = Some(value);
+                    }
+                }
+                "sport" | "workout_type" if workout_type.is_none() => {
+                    let display = field.to_string();
+                    if !display.is_empty() {
+                        workout_type = Some(display);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let (Some(ts), Some(dist)) = (timestamp, distance) {
+            distance_samples.push((ts, dist));
+        }
+    }
+
+    let duration_seconds = if timestamps.is_empty() {
+        None
+    } else {
+        let (min_ts, max_ts) = timestamps
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |acc, &ts| {
+                (acc.0.min(ts), acc.1.max(ts))
+            });
+        if min_ts.is_infinite() || max_ts.is_infinite() {
+            None
+        } else {
+            Some(max_ts - min_ts)
+        }
+    };
+
+    let distance_meters = distance_samples.last().map(|(_, dist)| *dist);
+
+    let mut speeds: Vec<f64> = Vec::new();
+    for window in distance_samples.windows(2) {
+        if let [(t1, d1), (t2, d2)] = window {
+            let dt = t2 - t1;
+            let dd = d2 - d1;
+            if dt > 0.0 && dd > 0.0 {
+                speeds.push(dd / dt);
+            }
+        }
+    }
+
+    let speed_min = speeds.iter().cloned().reduce(f64::min);
+    let speed_max = speeds.iter().cloned().reduce(f64::max);
+
+    let speed_mean = if let (Some((first_ts, first_dist)), Some((last_ts, last_dist))) =
+        (distance_samples.first(), distance_samples.last())
+    {
+        let dt = last_ts - first_ts;
+        let dd = last_dist - first_dist;
+        if dt > 0.0 && dd >= 0.0 {
+            Some(dd / dt)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    WorkoutSummary {
+        duration_seconds,
+        workout_type,
+        distance_meters,
+        speed_min,
+        speed_mean,
+        speed_max,
+    }
 }
 
 /// Parse a raw FIT file into its component parts while validating CRCs.
@@ -327,10 +436,9 @@ fn filter_data_section(
 
             let mut developer_fields = Vec::new();
             if has_developer_data {
-                let dev_count = *data_section
-                    .get(offset)
-                    .ok_or_else(|| FitProcessError::InvalidHeader("missing developer count".into()))?
-                    as usize;
+                let dev_count = *data_section.get(offset).ok_or_else(|| {
+                    FitProcessError::InvalidHeader("missing developer count".into())
+                })? as usize;
                 offset += 1;
 
                 developer_fields = Vec::with_capacity(dev_count);
@@ -349,17 +457,16 @@ fn filter_data_section(
                 }
             }
 
-            let filtered_fields = if options.remove_speed_fields
-                && global_mesg_num == MesgNum::Record.as_u16()
-            {
-                fields
-                    .iter()
-                    .filter(|field| !matches!(field.number, 6 | 73))
-                    .cloned()
-                    .collect::<Vec<_>>()
-            } else {
-                fields.clone()
-            };
+            let filtered_fields =
+                if options.remove_speed_fields && global_mesg_num == MesgNum::Record.as_u16() {
+                    fields
+                        .iter()
+                        .filter(|field| !matches!(field.number, 6 | 73))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                } else {
+                    fields.clone()
+                };
 
             definitions.insert(
                 local_message_num,
@@ -412,8 +519,9 @@ fn filter_data_section(
                 FitProcessError::InvalidHeader("data message missing preceding definition".into())
             })?;
 
-            let mut filtered_message =
-                Vec::with_capacity(1 + definition.filtered_fields.len() * 3 + definition.developer_fields.len() * 3);
+            let mut filtered_message = Vec::with_capacity(
+                1 + definition.filtered_fields.len() * 3 + definition.developer_fields.len() * 3,
+            );
             filtered_message.push(header);
 
             for field in &definition.fields {
