@@ -123,13 +123,12 @@ pub fn process_fit_bytes(
     })
 }
 
-/// Parse a raw FIT file into its component parts without failing on CRCs.
+/// Parse a raw FIT file into its component parts while validating CRCs.
 ///
 /// The official FIT structure is enforced here: the header length must be at
 /// least 12 bytes, the declared data length must match the payload present, and
 /// the file must be long enough to include the final two-byte CRC. CRC values
-/// are **not** verified because the caller may intentionally alter the bytes
-/// before re-encoding.
+/// are verified so corruption can be reported back to the caller.
 pub fn parse_fit(bytes: &[u8]) -> Result<ParsedFit, FitProcessError> {
     let header_size = *bytes
         .first()
@@ -180,15 +179,9 @@ pub fn parse_fit(bytes: &[u8]) -> Result<ParsedFit, FitProcessError> {
 
     let data_section = bytes[data_start..data_end].to_vec();
 
-    // CRC is recomputed later when we rebuild the payload, so we intentionally
-    // skip validation during parsing to allow working with partially modified
-    // files.
-    let decode_options: HashSet<DecodeOption> = [
-        DecodeOption::SkipHeaderCrcValidation,
-        DecodeOption::SkipDataCrcValidation,
-    ]
-    .into_iter()
-    .collect();
+    // Validate CRCs during parsing to surface corruption errors back to the caller.
+    // CRCs are recalculated when rebuilding the file in `reencode_fit_with_section`.
+    let decode_options: HashSet<DecodeOption> = HashSet::new();
 
     let records: Vec<FitDataRecord> = from_bytes_with_options(bytes, &decode_options)
         .map_err(|err| FitProcessError::ParseError(err.to_string()))?;
