@@ -46,6 +46,7 @@
     <p>Upload a FIT file to begin preprocessing.</p>
     <div class="options">
       <label><input type="checkbox" id="remove-speed" /> Remove speed fields</label>
+      <label><input type="checkbox" id="smooth-speed" /> Smooth speed (windowed)</label>
     </div>
     <div id="drop-zone" class="drop-zone">
       <p>Drag & drop your FIT file here, or click to select.</p>
@@ -62,6 +63,7 @@
     const statusEl = document.getElementById('status');
     const resultsEl = document.getElementById('results');
     const removeSpeedCheckbox = document.getElementById('remove-speed');
+    const smoothSpeedCheckbox = document.getElementById('smooth-speed');
 
     const preventDefaults = (e) => { e.preventDefault(); e.stopPropagation(); };
     ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
@@ -90,6 +92,7 @@
       const formData = new FormData();
       formData.append('file', files[0]);
       formData.append('remove_speed_fields', removeSpeedCheckbox.checked ? 'true' : 'false');
+      formData.append('smooth_speed', smoothSpeedCheckbox.checked ? 'true' : 'false');
       statusEl.textContent = 'Uploading...';
       resultsEl.innerHTML = '';
       try {

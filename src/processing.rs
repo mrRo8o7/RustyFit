@@ -14,11 +14,11 @@
 //! the web UI can render human-readable fields, optionally remove speed-related
 //! fields, and finally re-encode the data with an updated header and CRCs.
 
-use fitparser::{FitDataField, FitDataRecord};
-use std::convert::TryInto;
 use fitparser::de::{DecodeOption, from_bytes_with_options};
 use fitparser::profile::MesgNum;
+use fitparser::{FitDataField, FitDataRecord};
 use std::collections::HashSet;
+use std::convert::TryInto;
 use std::fmt;
 
 /// Simplified representation of a FIT field for display in the UI.
@@ -51,7 +51,12 @@ pub struct ProcessedFit {
 pub struct ProcessingOptions {
     /// Drop `speed` and `enhanced_speed` fields from record messages.
     pub remove_speed_fields: bool,
+    /// Smooth derived speed values using a sliding window before presenting them.
+    pub smooth_speed: bool,
 }
+
+/// Default window size (in samples) for moving-average speed smoothing.
+const SPEED_SMOOTHING_WINDOW: usize = 5;
 
 /// Decomposed pieces of the original FIT file used for later reconstruction.
 #[derive(Debug, Clone)]
@@ -60,6 +65,13 @@ pub struct ParsedFit {
     pub has_header_crc: bool,
     pub data_section: Vec<u8>,
     pub records: Vec<FitDataRecord>,
+}
+
+#[derive(Debug, Default)]
+struct DerivedWorkoutData {
+    summary: WorkoutSummary,
+    /// Smoothed (or raw) speeds aligned to the data record index for future preprocessing.
+    record_speeds: Vec<Option<f64>>,
 }
 
 #[derive(Debug)]
@@ -93,7 +105,7 @@ pub fn process_fit_bytes(
     options: &ProcessingOptions,
 ) -> Result<ProcessedFit, FitProcessError> {
     let parsed = parse_fit(bytes)?;
-    let summary = summarize_workout(&parsed.records);
+    let derived = derive_workout_data(&parsed.records, options);
 
     let filtered_records = parsed
         .records
@@ -113,18 +125,15 @@ pub fn process_fit_bytes(
         })
         .collect();
 
-    let processed_data_section = if options.remove_speed_fields {
-        filter_data_section(&parsed.data_section, options)?
-    } else {
-        parsed.data_section.clone()
-    };
+    let processed_data_section =
+        preprocess_data_section(&parsed.data_section, options, &derived.record_speeds)?;
 
     let processed_bytes = reencode_fit_with_section(&parsed, processed_data_section)?;
 
     Ok(ProcessedFit {
         records: filtered_records,
         processed_bytes,
-        summary,
+        summary: derived.summary,
     })
 }
 
@@ -143,27 +152,25 @@ pub struct WorkoutSummary {
 }
 
 fn field_value_to_f64(field: &FitDataField) -> Option<f64> {
-    field
-        .value()
-        .clone()
-        .try_into()
-        .ok()
-        .or_else(|| {
-            field
-                .to_string()
-                .split_whitespace()
-                .next()
-                .and_then(|raw| raw.parse::<f64>().ok())
-        })
+    field.value().clone().try_into().ok().or_else(|| {
+        field
+            .to_string()
+            .split_whitespace()
+            .next()
+            .and_then(|raw| raw.parse::<f64>().ok())
+    })
 }
 
-fn summarize_workout(records: &[FitDataRecord]) -> WorkoutSummary {
+fn derive_workout_data(
+    records: &[FitDataRecord],
+    options: &ProcessingOptions,
+) -> DerivedWorkoutData {
     let mut timestamps: Vec<f64> = Vec::new();
     let mut workout_type: Option<String> = None;
-    let mut distance_samples: Vec<(f64, f64)> = Vec::new();
+    let mut distance_samples: Vec<DistanceSample> = Vec::new();
     let mut heart_rates: Vec<f64> = Vec::new();
 
-    for record in records {
+    for (idx, record) in records.iter().enumerate() {
         let mut timestamp: Option<f64> = None;
         let mut distance: Option<f64> = None;
 
@@ -196,7 +203,11 @@ fn summarize_workout(records: &[FitDataRecord]) -> WorkoutSummary {
         }
 
         if let (Some(ts), Some(dist)) = (timestamp, distance) {
-            distance_samples.push((ts, dist));
+            distance_samples.push(DistanceSample {
+                record_index: idx,
+                timestamp: ts,
+                distance: dist,
+            });
         }
     }
 
@@ -215,34 +226,35 @@ fn summarize_workout(records: &[FitDataRecord]) -> WorkoutSummary {
         }
     };
 
-    let distance_meters = distance_samples.last().map(|(_, dist)| *dist);
+    let distance_meters = distance_samples.last().map(|sample| sample.distance);
 
-    let mut speeds: Vec<f64> = Vec::new();
-    for window in distance_samples.windows(2) {
-        if let [(t1, d1), (t2, d2)] = window {
-            let dt = t2 - t1;
-            let dd = d2 - d1;
-            if dt > 0.0 && dd > 0.0 {
-                speeds.push(dd / dt);
-            }
-        }
+    let mut speeds = compute_distance_based_speeds(&distance_samples);
+    if options.smooth_speed {
+        // Apply a simple centered moving average to dampen sharp spikes (staccato speeds)
+        // without relying on speed fields that might already be filtered out.
+        speeds = smooth_speed_window(&speeds, SPEED_SMOOTHING_WINDOW);
     }
 
     let speed_min = speeds.iter().cloned().reduce(f64::min);
     let speed_max = speeds.iter().cloned().reduce(f64::max);
 
-    let speed_mean = if let (Some((first_ts, first_dist)), Some((last_ts, last_dist))) =
-        (distance_samples.first(), distance_samples.last())
-    {
-        let dt = last_ts - first_ts;
-        let dd = last_dist - first_dist;
-        if dt > 0.0 && dd >= 0.0 {
-            Some(dd / dt)
+    let distance_mean =
+        if let (Some(first), Some(last)) = (distance_samples.first(), distance_samples.last()) {
+            let dt = last.timestamp - first.timestamp;
+            let dd = last.distance - first.distance;
+            if dt > 0.0 && dd >= 0.0 {
+                Some(dd / dt)
+            } else {
+                None
+            }
         } else {
             None
-        }
+        };
+
+    let speed_mean = if options.smooth_speed && !speeds.is_empty() {
+        Some(speeds.iter().sum::<f64>() / speeds.len() as f64)
     } else {
-        None
+        distance_mean
     };
 
     let heart_rate_min = heart_rates.iter().cloned().reduce(f64::min);
@@ -253,17 +265,70 @@ fn summarize_workout(records: &[FitDataRecord]) -> WorkoutSummary {
         Some(heart_rates.iter().sum::<f64>() / heart_rates.len() as f64)
     };
 
-    WorkoutSummary {
-        duration_seconds,
-        workout_type,
-        distance_meters,
-        speed_min,
-        speed_mean,
-        speed_max,
-        heart_rate_min,
-        heart_rate_mean,
-        heart_rate_max,
+    let mut record_speeds: Vec<Option<f64>> = vec![None; records.len()];
+    if options.smooth_speed {
+        for (sample_idx, sample) in distance_samples.iter().enumerate().skip(1) {
+            if let Some(speed) = speeds.get(sample_idx - 1).copied() {
+                record_speeds[sample.record_index] = Some(speed);
+            }
+        }
     }
+
+    DerivedWorkoutData {
+        summary: WorkoutSummary {
+            duration_seconds,
+            workout_type,
+            distance_meters,
+            speed_min,
+            speed_mean,
+            speed_max,
+            heart_rate_min,
+            heart_rate_mean,
+            heart_rate_max,
+        },
+        record_speeds,
+    }
+}
+
+/// Calculate per-sample speeds using distance deltas to avoid relying on FIT speed fields.
+#[derive(Debug, Clone)]
+struct DistanceSample {
+    record_index: usize,
+    timestamp: f64,
+    distance: f64,
+}
+
+fn compute_distance_based_speeds(distance_samples: &[DistanceSample]) -> Vec<f64> {
+    let mut speeds: Vec<f64> = Vec::new();
+    for window in distance_samples.windows(2) {
+        if let [first, second] = window {
+            let dt = second.timestamp - first.timestamp;
+            let dd = second.distance - first.distance;
+            if dt > 0.0 && dd > 0.0 {
+                speeds.push(dd / dt);
+            }
+        }
+    }
+    speeds
+}
+
+/// Smooth a speed series by averaging neighboring samples within a sliding window.
+fn smooth_speed_window(speeds: &[f64], window_size: usize) -> Vec<f64> {
+    if window_size == 0 || speeds.is_empty() {
+        return speeds.to_vec();
+    }
+
+    let radius = window_size / 2;
+    let len = speeds.len();
+
+    (0..len)
+        .map(|idx| {
+            let start = idx.saturating_sub(radius);
+            let end = (idx + radius + 1).min(len);
+            let window = &speeds[start..end];
+            window.iter().sum::<f64>() / window.len() as f64
+        })
+        .collect()
 }
 
 /// Parse a raw FIT file into its component parts while validating CRCs.
@@ -398,24 +463,23 @@ struct MessageDefinition {
     fields: Vec<FieldDefinition>,
     filtered_fields: Vec<FieldDefinition>,
     developer_fields: Vec<DeveloperFieldDefinition>,
+    architecture: u8,
 }
 
-/// Remove selected fields from the data section while keeping FIT framing valid.
+/// Apply preprocessing transforms (filtering, smoothing) to the FIT data section.
 ///
-/// The FIT data stream alternates between definition messages (which describe
-/// the layout of subsequent data messages for a local message number) and data
-/// messages (which contain values following the last definition). When a field
-/// is removed we must rebuild both the definition and the matching data
-/// messages so that offsets remain correct and decoders can still read the
-/// payload.
-fn filter_data_section(
+/// This keeps the traversal logic centralized so future preprocessing steps can
+/// be layered on without duplicating FIT framing rules.
+fn preprocess_data_section(
     data_section: &[u8],
     options: &ProcessingOptions,
+    record_speeds: &[Option<f64>],
 ) -> Result<Vec<u8>, FitProcessError> {
     let mut offset = 0usize;
     let mut definitions: std::collections::HashMap<u8, MessageDefinition> =
         std::collections::HashMap::new();
     let mut filtered: Vec<u8> = Vec::with_capacity(data_section.len());
+    let mut data_record_index: usize = 0;
 
     while offset < data_section.len() {
         let message_start = offset;
@@ -509,6 +573,7 @@ fn filter_data_section(
                     fields,
                     filtered_fields: filtered_fields.clone(),
                     developer_fields: developer_fields.clone(),
+                    architecture,
                 },
             );
 
@@ -565,11 +630,18 @@ fn filter_data_section(
                         "data message truncated".into(),
                     ));
                 }
+                let override_speed = record_speeds.get(data_record_index).copied().flatten();
                 let field_bytes = &data_section[offset..offset + field_size];
-                if !(options.remove_speed_fields
-                    && definition.global_mesg_num == MesgNum::Record.as_u16()
-                    && matches!(field.number, 6 | 73))
-                {
+
+                if should_remove_speed_field(&definition, field.number, options) {
+                    // Skip speed fields entirely when filtering them out.
+                } else if should_override_speed_field(&definition, field.number, override_speed) {
+                    filtered_message.extend_from_slice(&encode_speed_value(
+                        override_speed.expect("override exists due to guard"),
+                        field_size,
+                        definition.architecture,
+                    ));
+                } else {
                     filtered_message.extend_from_slice(field_bytes);
                 }
                 offset += field_size;
@@ -588,10 +660,57 @@ fn filter_data_section(
             }
 
             filtered.extend_from_slice(&filtered_message);
+            data_record_index += 1;
         }
     }
 
     Ok(filtered)
+}
+
+fn is_record_speed_field(definition: &MessageDefinition, field_number: u8) -> bool {
+    definition.global_mesg_num == MesgNum::Record.as_u16() && matches!(field_number, 6 | 73)
+}
+
+fn should_remove_speed_field(
+    definition: &MessageDefinition,
+    field_number: u8,
+    options: &ProcessingOptions,
+) -> bool {
+    options.remove_speed_fields && is_record_speed_field(definition, field_number)
+}
+
+fn should_override_speed_field(
+    definition: &MessageDefinition,
+    field_number: u8,
+    override_speed: Option<f64>,
+) -> bool {
+    override_speed.is_some() && is_record_speed_field(definition, field_number)
+}
+
+fn encode_speed_value(speed: f64, field_size: usize, architecture: u8) -> Vec<u8> {
+    let scale = 1000.0;
+    let scaled = (speed * scale).round().max(0.0);
+    let little_endian = architecture == 0;
+
+    match field_size {
+        2 => {
+            let clamped = scaled.min(u16::MAX as f64) as u16;
+            if little_endian {
+                clamped.to_le_bytes().to_vec()
+            } else {
+                clamped.to_be_bytes().to_vec()
+            }
+        }
+        4 => {
+            let clamped = scaled.min(u32::MAX as f64) as u32;
+            if little_endian {
+                clamped.to_le_bytes().to_vec()
+            } else {
+                clamped.to_be_bytes().to_vec()
+            }
+        }
+        _ => vec![0u8; field_size],
+    }
 }
 
 /// Compute the standard FIT CRC-16 using the Garmin nibble lookup table.
