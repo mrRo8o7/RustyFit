@@ -72,6 +72,8 @@ struct DerivedWorkoutData {
     summary: WorkoutSummary,
     /// Smoothed (or raw) speeds aligned to the data record index for future preprocessing.
     record_speeds: Vec<Option<f64>>,
+    /// Smoothed (or raw) distances aligned to the data record index for future preprocessing.
+    record_distances: Vec<Option<f64>>,
 }
 
 #[derive(Debug)]
@@ -125,8 +127,12 @@ pub fn process_fit_bytes(
         })
         .collect();
 
-    let processed_data_section =
-        preprocess_data_section(&parsed.data_section, options, &derived.record_speeds)?;
+    let processed_data_section = preprocess_data_section(
+        &parsed.data_section,
+        options,
+        &derived.record_speeds,
+        &derived.record_distances,
+    )?;
 
     let processed_bytes = reencode_fit_with_section(&parsed, processed_data_section)?;
 
@@ -226,7 +232,13 @@ fn derive_workout_data(
         }
     };
 
-    let distance_meters = distance_samples.last().map(|sample| sample.distance);
+    let time_intervals: Vec<f64> = distance_samples
+        .windows(2)
+        .map(|window| match window {
+            [first, second] => (second.timestamp - first.timestamp).max(0.0),
+            _ => 0.0,
+        })
+        .collect();
 
     let mut speeds = compute_distance_based_speeds(&distance_samples);
     if options.smooth_speed {
@@ -235,21 +247,43 @@ fn derive_workout_data(
         speeds = smooth_speed_window(&speeds, SPEED_SMOOTHING_WINDOW);
     }
 
-    let speed_min = speeds.iter().cloned().reduce(f64::min);
-    let speed_max = speeds.iter().cloned().reduce(f64::max);
+    let smoothed_distances = if options.smooth_speed {
+        Some(reconstruct_distance_series(
+            &distance_samples,
+            &speeds,
+            &time_intervals,
+        ))
+    } else {
+        None
+    };
 
-    let distance_mean =
-        if let (Some(first), Some(last)) = (distance_samples.first(), distance_samples.last()) {
-            let dt = last.timestamp - first.timestamp;
-            let dd = last.distance - first.distance;
-            if dt > 0.0 && dd >= 0.0 {
-                Some(dd / dt)
-            } else {
-                None
-            }
+    let distance_series: Vec<f64> = smoothed_distances
+        .as_ref()
+        .map(|distances| distances.clone())
+        .unwrap_or_else(|| distance_samples.iter().map(|sample| sample.distance).collect());
+
+    let distance_meters = distance_series.last().copied();
+
+    let positive_speeds: Vec<f64> = speeds.iter().copied().filter(|value| *value > 0.0).collect();
+    let speed_min = positive_speeds.iter().cloned().reduce(f64::min);
+    let speed_max = positive_speeds.iter().cloned().reduce(f64::max);
+
+    let distance_mean = if let (Some(first), Some(last)) =
+        (distance_samples.first(), distance_series.last())
+    {
+        let dt = distance_samples
+            .last()
+            .map(|sample| sample.timestamp - first.timestamp)
+            .unwrap_or(0.0);
+        let dd = last - first.distance;
+        if dt > 0.0 && dd >= 0.0 {
+            Some(dd / dt)
         } else {
             None
-        };
+        }
+    } else {
+        None
+    };
 
     let speed_mean = if options.smooth_speed && !speeds.is_empty() {
         Some(speeds.iter().sum::<f64>() / speeds.len() as f64)
@@ -266,10 +300,17 @@ fn derive_workout_data(
     };
 
     let mut record_speeds: Vec<Option<f64>> = vec![None; records.len()];
+    let mut record_distances: Vec<Option<f64>> = vec![None; records.len()];
     if options.smooth_speed {
         for (sample_idx, sample) in distance_samples.iter().enumerate().skip(1) {
             if let Some(speed) = speeds.get(sample_idx - 1).copied() {
                 record_speeds[sample.record_index] = Some(speed);
+            }
+        }
+
+        for (sample_idx, sample) in distance_samples.iter().enumerate() {
+            if let Some(distance) = distance_series.get(sample_idx).copied() {
+                record_distances[sample.record_index] = Some(distance);
             }
         }
     }
@@ -287,6 +328,7 @@ fn derive_workout_data(
             heart_rate_max,
         },
         record_speeds,
+        record_distances,
     }
 }
 
@@ -304,12 +346,42 @@ fn compute_distance_based_speeds(distance_samples: &[DistanceSample]) -> Vec<f64
         if let [first, second] = window {
             let dt = second.timestamp - first.timestamp;
             let dd = second.distance - first.distance;
-            if dt > 0.0 && dd > 0.0 {
-                speeds.push(dd / dt);
+            if dt > 0.0 {
+                speeds.push(dd.max(0.0) / dt);
+            } else {
+                speeds.push(0.0);
             }
         }
     }
     speeds
+}
+
+/// Reconstruct a distance series that aligns with smoothed speeds and timestamps.
+fn reconstruct_distance_series(
+    distance_samples: &[DistanceSample],
+    smoothed_speeds: &[f64],
+    intervals: &[f64],
+) -> Vec<f64> {
+    if distance_samples.is_empty() {
+        return Vec::new();
+    }
+
+    let mut distances = Vec::with_capacity(distance_samples.len());
+    distances.push(distance_samples[0].distance);
+
+    let steps = smoothed_speeds.len().min(intervals.len());
+    for idx in 0..steps {
+        let previous = *distances.last().unwrap_or(&distance_samples[0].distance);
+        let increment = smoothed_speeds[idx] * intervals[idx];
+        distances.push((previous + increment).max(previous));
+    }
+
+    while distances.len() < distance_samples.len() {
+        let last = *distances.last().unwrap_or(&distance_samples[0].distance);
+        distances.push(last);
+    }
+
+    distances
 }
 
 /// Smooth a speed series by averaging neighboring samples within a sliding window.
@@ -474,6 +546,7 @@ fn preprocess_data_section(
     data_section: &[u8],
     options: &ProcessingOptions,
     record_speeds: &[Option<f64>],
+    record_distances: &[Option<f64>],
 ) -> Result<Vec<u8>, FitProcessError> {
     let mut offset = 0usize;
     let mut definitions: std::collections::HashMap<u8, MessageDefinition> =
@@ -631,10 +704,18 @@ fn preprocess_data_section(
                     ));
                 }
                 let override_speed = record_speeds.get(data_record_index).copied().flatten();
+                let override_distance =
+                    record_distances.get(data_record_index).copied().flatten();
                 let field_bytes = &data_section[offset..offset + field_size];
 
                 if should_remove_speed_field(&definition, field.number, options) {
                     // Skip speed fields entirely when filtering them out.
+                } else if should_override_distance_field(&definition, field.number, override_distance) {
+                    filtered_message.extend_from_slice(&encode_distance_value(
+                        override_distance.expect("override exists due to guard"),
+                        field_size,
+                        definition.architecture,
+                    ));
                 } else if should_override_speed_field(&definition, field.number, override_speed) {
                     filtered_message.extend_from_slice(&encode_speed_value(
                         override_speed.expect("override exists due to guard"),
@@ -671,6 +752,10 @@ fn is_record_speed_field(definition: &MessageDefinition, field_number: u8) -> bo
     definition.global_mesg_num == MesgNum::Record.as_u16() && matches!(field_number, 6 | 73)
 }
 
+fn is_record_distance_field(definition: &MessageDefinition, field_number: u8) -> bool {
+    definition.global_mesg_num == MesgNum::Record.as_u16() && field_number == 5
+}
+
 fn should_remove_speed_field(
     definition: &MessageDefinition,
     field_number: u8,
@@ -687,9 +772,43 @@ fn should_override_speed_field(
     override_speed.is_some() && is_record_speed_field(definition, field_number)
 }
 
+fn should_override_distance_field(
+    definition: &MessageDefinition,
+    field_number: u8,
+    override_distance: Option<f64>,
+) -> bool {
+    override_distance.is_some() && is_record_distance_field(definition, field_number)
+}
+
 fn encode_speed_value(speed: f64, field_size: usize, architecture: u8) -> Vec<u8> {
     let scale = 1000.0;
     let scaled = (speed * scale).round().max(0.0);
+    let little_endian = architecture == 0;
+
+    match field_size {
+        2 => {
+            let clamped = scaled.min(u16::MAX as f64) as u16;
+            if little_endian {
+                clamped.to_le_bytes().to_vec()
+            } else {
+                clamped.to_be_bytes().to_vec()
+            }
+        }
+        4 => {
+            let clamped = scaled.min(u32::MAX as f64) as u32;
+            if little_endian {
+                clamped.to_le_bytes().to_vec()
+            } else {
+                clamped.to_be_bytes().to_vec()
+            }
+        }
+        _ => vec![0u8; field_size],
+    }
+}
+
+fn encode_distance_value(distance: f64, field_size: usize, architecture: u8) -> Vec<u8> {
+    let scale = 100.0;
+    let scaled = (distance * scale).round().max(0.0);
     let little_endian = architecture == 0;
 
     match field_size {

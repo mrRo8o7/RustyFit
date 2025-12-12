@@ -21,6 +21,25 @@ fn parse_speed_values(records: &[rustyfit::processing::DisplayRecord]) -> Vec<f6
         .collect()
 }
 
+fn parse_distance_values(records: &[rustyfit::processing::DisplayRecord]) -> Vec<f64> {
+    records
+        .iter()
+        .filter_map(|record| {
+            record.fields.iter().find_map(|field| {
+                if field.name == "distance" {
+                    field
+                        .value
+                        .split_whitespace()
+                        .next()
+                        .and_then(|raw| raw.parse::<f64>().ok())
+                } else {
+                    None
+                }
+            })
+        })
+        .collect()
+}
+
 fn smooth_series(values: &[f64], window_size: usize) -> Vec<f64> {
     if window_size == 0 || values.is_empty() {
         return values.to_vec();
@@ -75,18 +94,84 @@ fn distance_based_speeds(records: &[fitparser::FitDataRecord]) -> Vec<f64> {
         }
     }
 
-    let mut speeds = Vec::new();
-    for window in samples.windows(2) {
-        if let [(t1, d1), (t2, d2)] = window {
-            let dt = t2 - t1;
-            let dd = d2 - d1;
-            if dt > 0.0 && dd > 0.0 {
-                speeds.push(dd / dt);
+    samples
+        .windows(2)
+        .map(|window| match window {
+            [(t1, d1), (t2, d2)] => {
+                let dt = (t2 - t1).max(0.0);
+                let dd = (d2 - d1).max(0.0);
+                if dt > 0.0 { dd / dt } else { 0.0 }
             }
+            _ => 0.0,
+        })
+        .collect()
+}
+
+fn smoothed_distance_series(records: &[fitparser::FitDataRecord], window: usize) -> Vec<f64> {
+    let mut samples: Vec<(f64, f64)> = Vec::new();
+
+    for record in records {
+        let mut timestamp: Option<f64> = None;
+        let mut distance: Option<f64> = None;
+
+        for field in record.fields() {
+            match field.name() {
+                "timestamp" => {
+                    timestamp = field.value().clone().try_into().ok().or_else(|| {
+                        field
+                            .to_string()
+                            .split_whitespace()
+                            .next()
+                            .and_then(|raw| raw.parse::<f64>().ok())
+                    });
+                }
+                "distance" => {
+                    distance = field.value().clone().try_into().ok().or_else(|| {
+                        field
+                            .to_string()
+                            .split_whitespace()
+                            .next()
+                            .and_then(|raw| raw.parse::<f64>().ok())
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        if let (Some(ts), Some(dist)) = (timestamp, distance) {
+            samples.push((ts, dist));
         }
     }
 
-    speeds
+    if samples.is_empty() {
+        return Vec::new();
+    }
+
+    let intervals: Vec<f64> = samples
+        .windows(2)
+        .map(|pair| match pair {
+            [(t1, _), (t2, _)] => (t2 - t1).max(0.0),
+            _ => 0.0,
+        })
+        .collect();
+
+    let speeds = smooth_series(&distance_based_speeds(records), window);
+
+    let mut distances = Vec::with_capacity(samples.len());
+    distances.push(samples[0].1);
+
+    for (idx, speed) in speeds.iter().enumerate() {
+        let prev = *distances.last().unwrap_or(&samples[0].1);
+        let increment = speed * intervals.get(idx).copied().unwrap_or(0.0);
+        distances.push((prev + increment).max(prev));
+    }
+
+    while distances.len() < samples.len() {
+        let last = *distances.last().unwrap_or(&samples[0].1);
+        distances.push(last);
+    }
+
+    distances
 }
 
 #[test]
@@ -296,6 +381,59 @@ fn smoothed_speeds_are_written_to_processed_file() {
             "encoded speeds should track the smoothed series"
         );
     }
+}
+
+#[test]
+fn smoothed_distances_are_written_and_reimportable() {
+    let bytes = std::fs::read("tests/fixtures/activity.fit").expect("fixture should be present");
+
+    let smoothed = process_fit_bytes(
+        &bytes,
+        &ProcessingOptions {
+            smooth_speed: true,
+            ..Default::default()
+        },
+    )
+    .expect("smoothing should succeed");
+
+    let roundtrip = process_fit_bytes(&smoothed.processed_bytes, &ProcessingOptions::default())
+        .expect("processed FIT should remain decodable");
+
+    let baseline = process_fit_bytes(&bytes, &ProcessingOptions::default())
+        .expect("baseline processing should succeed");
+
+    let baseline_distances = parse_distance_values(&baseline.records);
+    let roundtrip_distances = parse_distance_values(&roundtrip.records);
+
+    assert_eq!(baseline_distances.len(), roundtrip_distances.len());
+    assert!(
+        baseline_distances
+            .iter()
+            .zip(&roundtrip_distances)
+            .any(|(base, smooth)| (base - smooth).abs() > 0.01),
+        "downloaded FIT should reflect smoothed distances"
+    );
+
+    let parsed = parse_fit(&bytes).expect("raw parse should succeed");
+    let expected_smoothed = smoothed_distance_series(&parsed.records, 5);
+    let compare_len = expected_smoothed.len().min(roundtrip_distances.len());
+    for (expected, encoded) in expected_smoothed
+        .iter()
+        .zip(&roundtrip_distances)
+        .take(compare_len)
+    {
+        assert!(
+            (expected - encoded).abs() < 1.0,
+            "encoded distances should track the smoothed series"
+        );
+    }
+
+    let expected_total = expected_smoothed.last().copied().unwrap_or(0.0);
+    let encoded_total = roundtrip.summary.distance_meters.unwrap_or(0.0);
+    assert!(
+        (expected_total - encoded_total).abs() < 1.0,
+        "smoothed distance should influence summary totals"
+    );
 }
 
 #[test]
