@@ -84,7 +84,7 @@ impl std::error::Error for FitProcessError {}
 /// 2. The parsed records are converted into a format suitable for HTML output
 ///    and filtered based on [`ProcessingOptions`].
 /// 3. The data section is optionally rewritten without speed fields and the
-///    file is reconstructed via [`reencode_fit_with_section`].
+///    file is reconstructed.
 pub fn process_fit_bytes(
     bytes: &[u8],
     options: &ProcessingOptions,
