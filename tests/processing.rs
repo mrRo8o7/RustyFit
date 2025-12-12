@@ -1,5 +1,5 @@
 use fitparser::from_bytes;
-use rustyfit::processing::{ProcessingOptions, process_fit_bytes};
+use rustyfit::processing::{FitProcessError, ProcessingOptions, process_fit_bytes};
 
 #[test]
 fn round_trip_returns_identical_bytes() {
@@ -111,4 +111,27 @@ fn filtered_download_keeps_crc_valid() {
 
     // Decoding without skipping CRC validation should succeed if we updated the header and data CRC.
     from_bytes(&processed.processed_bytes).expect("processed FIT bytes should have valid CRC");
+}
+
+#[test]
+fn invalid_crc_surfaces_an_error() {
+    let mut bytes = std::fs::read("tests/fixtures/activity.fit").expect("fixture should be present");
+
+    // Flip the last byte to invalidate the trailing data CRC.
+    if let Some(last) = bytes.last_mut() {
+        *last ^= 0xFF;
+    }
+
+    let error = process_fit_bytes(&bytes, &ProcessingOptions::default())
+        .expect_err("processing should fail when CRC is invalid");
+
+    match error {
+        FitProcessError::ParseError(message) => {
+            assert!(
+                message.to_lowercase().contains("crc"),
+                "error message should mention CRC validation"
+            );
+        }
+        other => panic!("unexpected error variant: {:?}", other),
+    }
 }
