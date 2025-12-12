@@ -1,5 +1,6 @@
 use fitparser::from_bytes;
 use rustyfit::processing::{FitProcessError, ProcessingOptions, process_fit_bytes};
+use rustyfit::templates::render_processed_records;
 
 #[test]
 fn round_trip_returns_identical_bytes() {
@@ -154,6 +155,21 @@ fn filtered_download_keeps_crc_valid() {
 
     // Decoding without skipping CRC validation should succeed if we updated the header and data CRC.
     from_bytes(&processed.processed_bytes).expect("processed FIT bytes should have valid CRC");
+}
+
+#[test]
+fn rendered_summary_uses_pace_units() {
+    let bytes = std::fs::read("tests/fixtures/activity.fit").expect("fixture should be present");
+
+    let processed = process_fit_bytes(&bytes, &ProcessingOptions::default())
+        .expect("processing should succeed");
+
+    let rendered = render_processed_records(&processed);
+
+    assert!(
+        rendered.contains("min/km"),
+        "Rendered summary should display speed as pace"
+    );
 }
 
 #[test]

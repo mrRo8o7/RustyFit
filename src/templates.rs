@@ -30,8 +30,21 @@ fn format_distance(meters: Option<f64>) -> String {
 
 fn format_speed(speed: Option<f64>) -> String {
     match speed {
-        Some(value) => format!("{:.2} km/h", value * 3.6),
-        None => "—".to_string(),
+        Some(value) if value > 0.0 => {
+            let total_minutes = 1000.0 / (value * 60.0);
+            let whole_minutes = total_minutes.floor();
+            let mut seconds = ((total_minutes - whole_minutes) * 60.0).round();
+
+            // Account for rounding up to the next minute when seconds hit 60.
+            let mut minutes = whole_minutes as u64;
+            if seconds >= 60.0 {
+                minutes += 1;
+                seconds = 0.0;
+            }
+
+            format!("{}:{:02} min/km", minutes, seconds as u64)
+        }
+        _ => "—".to_string(),
     }
 }
 
