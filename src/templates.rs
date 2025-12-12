@@ -48,6 +48,13 @@ fn format_speed(speed: Option<f64>) -> String {
     }
 }
 
+fn format_heart_rate(value: Option<f64>) -> String {
+    match value {
+        Some(hr) if hr.is_finite() && hr > 0.0 => format!("{:.0} bpm", hr.round()),
+        _ => "—".to_string(),
+    }
+}
+
 pub fn render_landing_page() -> String {
     include_str!("../templates/landing.html").to_string()
 }
@@ -61,6 +68,11 @@ pub fn render_processed_records(processed: &ProcessedFit) -> String {
         format_speed(summary.speed_min),
         format_speed(summary.speed_mean),
         format_speed(summary.speed_max),
+    );
+    let (min_hr, mean_hr, max_hr) = (
+        format_heart_rate(summary.heart_rate_min),
+        format_heart_rate(summary.heart_rate_mean),
+        format_heart_rate(summary.heart_rate_max),
     );
 
     body.push_str("<section class=\"results-card\">");
@@ -100,6 +112,18 @@ pub fn render_processed_records(processed: &ProcessedFit) -> String {
     body.push_str(&format!(
         "<div class=\"summary-card\"><p class=\"label\">Speed (max)</p><p class=\"value\">{}</p></div>",
         max_speed
+    ));
+    body.push_str(&format!(
+        "<div class=\"summary-card\"><p class=\"label\">Heart Rate (min)</p><p class=\"value\">{}</p></div>",
+        min_hr
+    ));
+    body.push_str(&format!(
+        "<div class=\"summary-card\"><p class=\"label\">Heart Rate (mean)</p><p class=\"value\">{}</p></div>",
+        mean_hr
+    ));
+    body.push_str(&format!(
+        "<div class=\"summary-card\"><p class=\"label\">Heart Rate (max)</p><p class=\"value\">{}</p></div>",
+        max_hr
     ));
     body.push_str("</div>");
     body.push_str("</section>");

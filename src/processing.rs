@@ -14,7 +14,8 @@
 //! the web UI can render human-readable fields, optionally remove speed-related
 //! fields, and finally re-encode the data with an updated header and CRCs.
 
-use fitparser::FitDataRecord;
+use fitparser::{FitDataField, FitDataRecord};
+use std::convert::TryInto;
 use fitparser::de::{DecodeOption, from_bytes_with_options};
 use fitparser::profile::MesgNum;
 use std::collections::HashSet;
@@ -136,14 +137,31 @@ pub struct WorkoutSummary {
     pub speed_min: Option<f64>,
     pub speed_mean: Option<f64>,
     pub speed_max: Option<f64>,
+    pub heart_rate_min: Option<f64>,
+    pub heart_rate_mean: Option<f64>,
+    pub heart_rate_max: Option<f64>,
+}
+
+fn field_value_to_f64(field: &FitDataField) -> Option<f64> {
+    field
+        .value()
+        .clone()
+        .try_into()
+        .ok()
+        .or_else(|| {
+            field
+                .to_string()
+                .split_whitespace()
+                .next()
+                .and_then(|raw| raw.parse::<f64>().ok())
+        })
 }
 
 fn summarize_workout(records: &[FitDataRecord]) -> WorkoutSummary {
-    use std::convert::TryInto;
-
     let mut timestamps: Vec<f64> = Vec::new();
     let mut workout_type: Option<String> = None;
     let mut distance_samples: Vec<(f64, f64)> = Vec::new();
+    let mut heart_rates: Vec<f64> = Vec::new();
 
     for record in records {
         let mut timestamp: Option<f64> = None;
@@ -152,14 +170,19 @@ fn summarize_workout(records: &[FitDataRecord]) -> WorkoutSummary {
         for field in record.fields() {
             match field.name() {
                 "timestamp" => {
-                    if let Ok(value) = field.value().clone().try_into() {
+                    if let Some(value) = field_value_to_f64(field) {
                         timestamp = Some(value);
                         timestamps.push(value);
                     }
                 }
                 "distance" => {
-                    if let Ok(value) = field.value().clone().try_into() {
+                    if let Some(value) = field_value_to_f64(field) {
                         distance = Some(value);
+                    }
+                }
+                "heart_rate" => {
+                    if let Some(value) = field_value_to_f64(field) {
+                        heart_rates.push(value);
                     }
                 }
                 "sport" | "workout_type" if workout_type.is_none() => {
@@ -222,6 +245,14 @@ fn summarize_workout(records: &[FitDataRecord]) -> WorkoutSummary {
         None
     };
 
+    let heart_rate_min = heart_rates.iter().cloned().reduce(f64::min);
+    let heart_rate_max = heart_rates.iter().cloned().reduce(f64::max);
+    let heart_rate_mean = if heart_rates.is_empty() {
+        None
+    } else {
+        Some(heart_rates.iter().sum::<f64>() / heart_rates.len() as f64)
+    };
+
     WorkoutSummary {
         duration_seconds,
         workout_type,
@@ -229,6 +260,9 @@ fn summarize_workout(records: &[FitDataRecord]) -> WorkoutSummary {
         speed_min,
         speed_mean,
         speed_max,
+        heart_rate_min,
+        heart_rate_mean,
+        heart_rate_max,
     }
 }
 

@@ -173,6 +173,55 @@ fn rendered_summary_uses_pace_units() {
 }
 
 #[test]
+fn heart_rate_summary_is_rendered() {
+    let bytes = std::fs::read("tests/fixtures/activity.fit").expect("fixture should be present");
+
+    let processed = process_fit_bytes(&bytes, &ProcessingOptions::default())
+        .expect("processing should succeed");
+
+    let rendered = render_processed_records(&processed);
+
+    assert!(rendered.contains("Heart Rate (mean)"));
+    assert!(rendered.contains("Heart Rate (min)"));
+    assert!(rendered.contains("Heart Rate (max)"));
+}
+
+#[test]
+fn rendering_handles_missing_workout_fields() {
+    let processed = rustyfit::processing::ProcessedFit {
+        records: Vec::new(),
+        processed_bytes: Vec::new(),
+        summary: rustyfit::processing::WorkoutSummary::default(),
+    };
+
+    let rendered = render_processed_records(&processed);
+
+    assert!(rendered.contains("Workout Overview"));
+    assert!(rendered.contains("Unknown"));
+    assert!(rendered.contains("—"));
+}
+
+#[test]
+fn heart_rate_formatting_uses_bpm_units() {
+    let processed = rustyfit::processing::ProcessedFit {
+        records: Vec::new(),
+        processed_bytes: Vec::new(),
+        summary: rustyfit::processing::WorkoutSummary {
+            heart_rate_min: Some(120.4),
+            heart_rate_mean: Some(130.6),
+            heart_rate_max: Some(148.9),
+            ..Default::default()
+        },
+    };
+
+    let rendered = render_processed_records(&processed);
+
+    assert!(rendered.contains("120 bpm"));
+    assert!(rendered.contains("131 bpm"));
+    assert!(rendered.contains("149 bpm"));
+}
+
+#[test]
 fn invalid_crc_surfaces_an_error() {
     let mut bytes =
         std::fs::read("tests/fixtures/activity.fit").expect("fixture should be present");
