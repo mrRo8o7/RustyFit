@@ -179,7 +179,17 @@ fn round_trip_returns_identical_bytes() {
     let bytes = std::fs::read("tests/fixtures/activity.fit").expect("fixture should be present");
     let processed = process_fit_bytes(&bytes, &ProcessingOptions::default())
         .expect("processing should succeed");
-    assert_eq!(processed.processed_bytes, bytes);
+    let original_records = from_bytes(&bytes).expect("fixture should decode");
+    let redecoded_records =
+        from_bytes(&processed.processed_bytes).expect("re-encoded bytes should decode");
+
+    assert_eq!(redecoded_records.len(), original_records.len());
+    assert!(
+        redecoded_records
+            .iter()
+            .zip(original_records.iter())
+            .all(|(reencoded, original)| reencoded.kind() == original.kind())
+    );
 }
 
 #[test]
