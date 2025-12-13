@@ -38,10 +38,10 @@ The FIT protocol stores binary data with a small header, a stream of definition 
 +-----------------------------------------------------------------+
 ```
 
-1. `parse_fit` enforces basic FIT layout: the first byte declares the header size, the next four bytes declare the data payload length, and the file ends with a two-byte CRC. CRC validation is skipped so we can safely alter the payload.
+1. `parse_fit` enforces basic FIT layout: the first byte declares the header size, the next four bytes declare the data payload length, and the file ends with a two-byte CRC.
 2. The parsed `FitDataRecord`s are converted into human-readable `DisplayRecord`s for the UI.
-3. When the "Remove speed fields" option is enabled, the data stream is walked byte-by-byte. For each message definition RustyFit rebuilds the definition without `speed` and `enhanced_speed` fields and then rewrites subsequent data messages to match the new layout.
-4. `reencode_fit_with_section` stitches the updated data payload back onto the original header, adjusts the declared data length, and recalculates the CRC over the combined header and data bytes.
+3. Speed filtering and smoothing operate on decoded `FitDataRecord`s so we can drop or adjust fields without manually rewriting FIT headers.
+4. The updated records are re-encoded with `fitparser::encode_records`, which rebuilds the FIT header and CRC for us.
 
 Reading through `processing.rs` alongside a FIT specification (or the links below) is the quickest way to understand the project’s handling of the format.
 

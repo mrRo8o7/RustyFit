@@ -69,9 +69,6 @@ pub const SPEED_SMOOTHING_WINDOW: usize = 5;
 /// Decomposed pieces of the original FIT file used for later reconstruction.
 #[derive(Debug, Clone)]
 pub struct ParsedFit {
-    pub header_without_crc: Vec<u8>,
-    pub has_header_crc: bool,
-    pub data_section: Vec<u8>,
     pub records: Vec<fitparser::FitDataRecord>,
 }
 
