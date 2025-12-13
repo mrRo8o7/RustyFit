@@ -14,6 +14,21 @@ pub struct DisplayRecord {
     pub fields: Vec<DisplayField>,
 }
 
+/// Preprocessed representation of a FIT record used for both summarization and display.
+#[derive(Debug, Clone)]
+pub struct PreprocessedRecord {
+    pub message_type: String,
+    pub fields: Vec<PreprocessedField>,
+}
+
+/// Field data captured during preprocessing, retaining parsed numeric values when present.
+#[derive(Debug, Clone)]
+pub struct PreprocessedField {
+    pub name: String,
+    pub value: String,
+    pub numeric_value: Option<f64>,
+}
+
 /// Processed FIT output returned to the web handler.
 #[derive(Debug, Clone)]
 pub struct ProcessedFit {
