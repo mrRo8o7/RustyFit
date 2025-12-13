@@ -77,7 +77,7 @@ pub fn render_processed_records(processed: &ProcessedFit, download_url: &str) ->
         "<div class=\"results-header\"><div><p class=\"eyebrow\">Workout Overview</p><h2>Freshly parsed FIT file</h2></div>",
     );
     body.push_str(&format!(
-        "<a class=\"cta\" download=\\\"processed.fit\\\" href=\\\"{download_url}\\\">Download processed FIT</a>"
+        "<a class=\"cta\" download=processed.fit href={download_url}>Download processed FIT</a>"
     ));
     body.push_str("</div>");
 
