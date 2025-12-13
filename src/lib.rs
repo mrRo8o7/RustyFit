@@ -44,6 +44,11 @@ async fn handle_upload(mut multipart: Multipart) -> impl IntoResponse {
                     options.remove_speed_fields = value == "true" || value == "on";
                 }
             }
+            Some("smooth_speed") => {
+                if let Ok(value) = field.text().await {
+                    options.smooth_speed = value == "true" || value == "on";
+                }
+            }
             _ => {}
         }
     }
