@@ -1,5 +1,12 @@
-use crate::processing::types::{FitProcessError, ParsedFit, ProcessingOptions};
+use crate::processing::summary::{
+    field_value_to_f64, reconstruct_distance_series, smooth_speed_window, DistanceSample,
+};
+use crate::processing::types::{
+    FitProcessError, ParsedFit, PreprocessedField, PreprocessedRecord, ProcessingOptions,
+    SPEED_SMOOTHING_WINDOW,
+};
 use fitparser::profile::MesgNum;
+use fitparser::FitDataRecord;
 use std::convert::TryInto;
 
 #[derive(Clone, Debug)]
@@ -25,15 +32,45 @@ struct MessageDefinition {
     architecture: u8,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct RecordOverrides {
+    pub speed: Option<f64>,
+    pub distance: Option<f64>,
+}
+
+/// Preprocess FIT data to align with downstream derive/display steps.
+pub fn preprocess_fit(
+    parsed: &ParsedFit,
+    options: &ProcessingOptions,
+) -> Result<(Vec<u8>, Vec<PreprocessedRecord>), FitProcessError> {
+    let overrides = compute_record_overrides(&parsed.records, options);
+    let processed_data_section = preprocess_data_section_with_overrides(
+        &parsed.data_section,
+        options,
+        &overrides,
+    )?;
+    let records = build_preprocessed_records(&parsed.records, &overrides, options);
+
+    Ok((processed_data_section, records))
+}
+
 /// Apply preprocessing transforms (filtering, smoothing) to the FIT data section.
 ///
 /// This keeps the traversal logic centralized so future preprocessing steps can
 /// be layered on without duplicating FIT framing rules.
 pub fn preprocess_data_section(
     data_section: &[u8],
+    records: &[FitDataRecord],
     options: &ProcessingOptions,
-    record_speeds: &[Option<f64>],
-    record_distances: &[Option<f64>],
+) -> Result<Vec<u8>, FitProcessError> {
+    let overrides = compute_record_overrides(records, options);
+    preprocess_data_section_with_overrides(data_section, options, &overrides)
+}
+
+pub fn preprocess_data_section_with_overrides(
+    data_section: &[u8],
+    options: &ProcessingOptions,
+    overrides: &[RecordOverrides],
 ) -> Result<Vec<u8>, FitProcessError> {
     let mut offset = 0usize;
     let mut definitions: std::collections::HashMap<u8, MessageDefinition> =
@@ -188,8 +225,12 @@ pub fn preprocess_data_section(
                         "data message truncated".into(),
                     ));
                 }
-                let override_speed = record_speeds.get(data_record_index).copied().flatten();
-                let override_distance = record_distances.get(data_record_index).copied().flatten();
+                let override_speed = overrides
+                    .get(data_record_index)
+                    .and_then(|override_set| override_set.speed);
+                let override_distance = overrides
+                    .get(data_record_index)
+                    .and_then(|override_set| override_set.distance);
                 let field_bytes = &data_section[offset..offset + field_size];
 
                 if should_remove_speed_field(&definition, field.number, options) {
@@ -234,6 +275,143 @@ pub fn preprocess_data_section(
     }
 
     Ok(filtered)
+}
+
+pub fn compute_record_overrides(
+    records: &[FitDataRecord],
+    options: &ProcessingOptions,
+) -> Vec<RecordOverrides> {
+    if !options.smooth_speed {
+        return vec![RecordOverrides::default(); records.len()];
+    }
+
+    let mut distance_samples: Vec<DistanceSample> = Vec::new();
+
+    for (record_index, record) in records.iter().enumerate() {
+        let mut timestamp: Option<f64> = None;
+        let mut distance: Option<f64> = None;
+
+        for field in record.fields() {
+            match field.name() {
+                "timestamp" => timestamp = field_value_to_f64(field),
+                "distance" => distance = field_value_to_f64(field),
+                _ => {}
+            }
+        }
+
+        if let (Some(ts), Some(dist)) = (timestamp, distance) {
+            distance_samples.push(DistanceSample {
+                record_index,
+                timestamp: ts,
+                distance: dist,
+            });
+        }
+    }
+
+    if distance_samples.len() < 2 {
+        return vec![RecordOverrides::default(); records.len()];
+    }
+
+    let time_intervals: Vec<f64> = distance_samples
+        .windows(2)
+        .map(|window| match window {
+            [first, second] => (second.timestamp - first.timestamp).max(0.0),
+            _ => 0.0,
+        })
+        .collect();
+
+    let mut speeds: Vec<f64> = Vec::new();
+    for window in distance_samples.windows(2) {
+        if let [first, second] = window {
+            let dt = second.timestamp - first.timestamp;
+            let dd = second.distance - first.distance;
+            if dt > 0.0 {
+                speeds.push(dd.max(0.0) / dt);
+            } else {
+                speeds.push(0.0);
+            }
+        }
+    }
+
+    let smoothed_speeds = smooth_speed_window(&speeds, SPEED_SMOOTHING_WINDOW);
+    let smoothed_distances =
+        reconstruct_distance_series(&distance_samples, &smoothed_speeds, &time_intervals);
+
+    let mut record_speeds: Vec<Option<f64>> = vec![None; records.len()];
+    let mut record_distances: Vec<Option<f64>> = vec![None; records.len()];
+
+    for (sample_idx, sample) in distance_samples.iter().enumerate().skip(1) {
+        if let Some(speed) = smoothed_speeds.get(sample_idx - 1).copied() {
+            record_speeds[sample.record_index] = Some(speed);
+        }
+    }
+
+    for (sample_idx, sample) in distance_samples.iter().enumerate() {
+        if let Some(distance) = smoothed_distances.get(sample_idx).copied() {
+            record_distances[sample.record_index] = Some(distance);
+        }
+    }
+
+    record_speeds
+        .into_iter()
+        .zip(record_distances.into_iter())
+        .map(|(speed, distance)| RecordOverrides { speed, distance })
+        .collect()
+}
+
+fn build_preprocessed_records(
+    records: &[FitDataRecord],
+    overrides: &[RecordOverrides],
+    options: &ProcessingOptions,
+) -> Vec<PreprocessedRecord> {
+    records
+        .iter()
+        .enumerate()
+        .map(|(idx, record)| {
+            let mut fields: Vec<PreprocessedField> = Vec::new();
+            let overrides = overrides.get(idx).cloned().unwrap_or_default();
+            let is_record_message = matches!(record.kind(), MesgNum::Record);
+
+            for field in record.fields() {
+                let name = field.name().to_string();
+
+                if options.remove_speed_fields
+                    && is_record_message
+                    && matches!(name.as_str(), "speed" | "enhanced_speed")
+                {
+                    continue;
+                }
+
+                let mut numeric_value = field_value_to_f64(field);
+                let mut value = field.to_string();
+
+                if is_record_message && name == "distance" {
+                    if let Some(distance) = overrides.distance {
+                        numeric_value = Some(distance);
+                        value = format!("{distance}");
+                    }
+                } else if is_record_message
+                    && matches!(name.as_str(), "speed" | "enhanced_speed")
+                {
+                    if let Some(speed) = overrides.speed {
+                        numeric_value = Some(speed);
+                        value = format!("{speed}");
+                    }
+                }
+
+                fields.push(PreprocessedField {
+                    name,
+                    value,
+                    numeric_value,
+                });
+            }
+
+            PreprocessedRecord {
+                message_type: format!("{:?}", record.kind()),
+                fields,
+            }
+        })
+        .collect()
 }
 
 pub fn reencode_fit_with_section(

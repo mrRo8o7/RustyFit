@@ -1,22 +1,16 @@
-use crate::processing::types::{
-    DerivedWorkoutData, ProcessingOptions, SPEED_SMOOTHING_WINDOW, WorkoutSummary,
-};
+use crate::processing::types::{DerivedWorkoutData, PreprocessedRecord, WorkoutSummary};
 use fitparser::FitDataField;
-use fitparser::FitDataRecord;
 use std::convert::TryInto;
 
 #[derive(Debug, Clone)]
-struct DistanceSample {
-    record_index: usize,
-    timestamp: f64,
-    distance: f64,
+pub(crate) struct DistanceSample {
+    pub(crate) record_index: usize,
+    pub(crate) timestamp: f64,
+    pub(crate) distance: f64,
 }
 
 /// Convert FIT fields into derived metrics and optional smoothed series.
-pub fn derive_workout_data(
-    records: &[FitDataRecord],
-    options: &ProcessingOptions,
-) -> DerivedWorkoutData {
+pub fn derive_workout_data(records: &[PreprocessedRecord]) -> DerivedWorkoutData {
     let mut timestamps: Vec<f64> = Vec::new();
     let mut workout_type: Option<String> = None;
     let mut distance_samples: Vec<DistanceSample> = Vec::new();
@@ -26,26 +20,26 @@ pub fn derive_workout_data(
         let mut timestamp: Option<f64> = None;
         let mut distance: Option<f64> = None;
 
-        for field in record.fields() {
-            match field.name() {
+        for field in &record.fields {
+            match field.name.as_str() {
                 "timestamp" => {
-                    if let Some(value) = field_value_to_f64(field) {
+                    if let Some(value) = field.numeric_value {
                         timestamp = Some(value);
                         timestamps.push(value);
                     }
                 }
                 "distance" => {
-                    if let Some(value) = field_value_to_f64(field) {
+                    if let Some(value) = field.numeric_value {
                         distance = Some(value);
                     }
                 }
                 "heart_rate" => {
-                    if let Some(value) = field_value_to_f64(field) {
+                    if let Some(value) = field.numeric_value {
                         heart_rates.push(value);
                     }
                 }
                 "sport" | "workout_type" if workout_type.is_none() => {
-                    let display = field.to_string();
+                    let display = field.value.clone();
                     if !display.is_empty() {
                         workout_type = Some(display);
                     }
@@ -72,20 +66,12 @@ pub fn derive_workout_data(
         })
         .collect();
 
-    let mut speeds = compute_distance_based_speeds(&distance_samples);
-    if options.smooth_speed {
-        speeds = smooth_speed_window(&speeds, SPEED_SMOOTHING_WINDOW);
-    }
-
-    let smoothed_distances = if options.smooth_speed {
-        Some(reconstruct_distance_series(
-            &distance_samples,
-            &speeds,
-            &time_intervals,
-        ))
-    } else {
-        None
-    };
+    let speeds = compute_distance_based_speeds(&distance_samples);
+    let smoothed_distances = Some(reconstruct_distance_series(
+        &distance_samples,
+        &speeds,
+        &time_intervals,
+    ));
 
     let distance_series: Vec<f64> = smoothed_distances
         .as_ref()
@@ -105,7 +91,7 @@ pub fn derive_workout_data(
         .collect();
     let speed_min = positive_speeds.iter().cloned().reduce(f64::min);
     let speed_max = positive_speeds.iter().cloned().reduce(f64::max);
-    let speed_mean = derive_speed_mean(options, &distance_samples, &distance_series, &speeds);
+    let speed_mean = derive_speed_mean(&distance_samples, &distance_series, &speeds);
 
     let heart_rate_min = heart_rates.iter().cloned().reduce(f64::min);
     let heart_rate_max = heart_rates.iter().cloned().reduce(f64::max);
@@ -114,22 +100,6 @@ pub fn derive_workout_data(
     } else {
         Some(heart_rates.iter().sum::<f64>() / heart_rates.len() as f64)
     };
-
-    let mut record_speeds: Vec<Option<f64>> = vec![None; records.len()];
-    let mut record_distances: Vec<Option<f64>> = vec![None; records.len()];
-    if options.smooth_speed {
-        for (sample_idx, sample) in distance_samples.iter().enumerate().skip(1) {
-            if let Some(speed) = speeds.get(sample_idx - 1).copied() {
-                record_speeds[sample.record_index] = Some(speed);
-            }
-        }
-
-        for (sample_idx, sample) in distance_samples.iter().enumerate() {
-            if let Some(distance) = distance_series.get(sample_idx).copied() {
-                record_distances[sample.record_index] = Some(distance);
-            }
-        }
-    }
 
     DerivedWorkoutData {
         summary: WorkoutSummary {
@@ -143,8 +113,6 @@ pub fn derive_workout_data(
             heart_rate_mean,
             heart_rate_max,
         },
-        record_speeds,
-        record_distances,
     }
 }
 
@@ -165,12 +133,11 @@ fn derive_duration(timestamps: &[f64]) -> Option<f64> {
 }
 
 fn derive_speed_mean(
-    options: &ProcessingOptions,
     distance_samples: &[DistanceSample],
     distance_series: &[f64],
     speeds: &[f64],
 ) -> Option<f64> {
-    if options.smooth_speed && !speeds.is_empty() {
+    if !speeds.is_empty() {
         return Some(speeds.iter().sum::<f64>() / speeds.len() as f64);
     }
 
@@ -188,7 +155,7 @@ fn derive_speed_mean(
     None
 }
 
-fn field_value_to_f64(field: &FitDataField) -> Option<f64> {
+pub(crate) fn field_value_to_f64(field: &FitDataField) -> Option<f64> {
     field.value().clone().try_into().ok().or_else(|| {
         field
             .to_string()
@@ -214,7 +181,7 @@ fn compute_distance_based_speeds(distance_samples: &[DistanceSample]) -> Vec<f64
     speeds
 }
 
-fn reconstruct_distance_series(
+pub(crate) fn reconstruct_distance_series(
     distance_samples: &[DistanceSample],
     smoothed_speeds: &[f64],
     intervals: &[f64],
@@ -241,7 +208,7 @@ fn reconstruct_distance_series(
     distances
 }
 
-fn smooth_speed_window(speeds: &[f64], window_size: usize) -> Vec<f64> {
+pub(crate) fn smooth_speed_window(speeds: &[f64], window_size: usize) -> Vec<f64> {
     if window_size == 0 || speeds.is_empty() {
         return speeds.to_vec();
     }
