@@ -20,7 +20,7 @@ mod tests {
     use crate::templates::render_processed_records;
 
     fn fixture_bytes() -> Vec<u8> {
-        std::fs::read("fixtures/activity.fit").expect("fixture should be present")
+        std::fs::read("test/fixtures/activity.fit").expect("fixture should be present")
     }
 
     #[test]
