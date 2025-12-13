@@ -63,10 +63,6 @@ pub struct ParsedFit {
 #[derive(Debug, Default)]
 pub struct DerivedWorkoutData {
     pub summary: WorkoutSummary,
-    /// Smoothed (or raw) speeds aligned to the data record index for future preprocessing.
-    pub record_speeds: Vec<Option<f64>>,
-    /// Smoothed (or raw) distances aligned to the data record index for future preprocessing.
-    pub record_distances: Vec<Option<f64>>,
 }
 
 #[derive(Debug)]

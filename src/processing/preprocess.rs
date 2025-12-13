@@ -1,5 +1,9 @@
-use crate::processing::types::{FitProcessError, ParsedFit, ProcessingOptions};
+use crate::processing::summary::{
+    field_value_to_f64, reconstruct_distance_series, smooth_speed_window, DistanceSample,
+};
+use crate::processing::types::{FitProcessError, ParsedFit, ProcessingOptions, SPEED_SMOOTHING_WINDOW};
 use fitparser::profile::MesgNum;
+use fitparser::FitDataRecord;
 use std::convert::TryInto;
 
 #[derive(Clone, Debug)]
@@ -31,10 +35,10 @@ struct MessageDefinition {
 /// be layered on without duplicating FIT framing rules.
 pub fn preprocess_data_section(
     data_section: &[u8],
+    records: &[FitDataRecord],
     options: &ProcessingOptions,
-    record_speeds: &[Option<f64>],
-    record_distances: &[Option<f64>],
 ) -> Result<Vec<u8>, FitProcessError> {
+    let (record_speeds, record_distances) = compute_record_overrides(records, options);
     let mut offset = 0usize;
     let mut definitions: std::collections::HashMap<u8, MessageDefinition> =
         std::collections::HashMap::new();
@@ -234,6 +238,84 @@ pub fn preprocess_data_section(
     }
 
     Ok(filtered)
+}
+
+fn compute_record_overrides(
+    records: &[FitDataRecord],
+    options: &ProcessingOptions,
+) -> (Vec<Option<f64>>, Vec<Option<f64>>) {
+    if !options.smooth_speed {
+        return (vec![None; records.len()], vec![None; records.len()]);
+    }
+
+    let mut distance_samples: Vec<DistanceSample> = Vec::new();
+
+    for (record_index, record) in records.iter().enumerate() {
+        let mut timestamp: Option<f64> = None;
+        let mut distance: Option<f64> = None;
+
+        for field in record.fields() {
+            match field.name() {
+                "timestamp" => timestamp = field_value_to_f64(field),
+                "distance" => distance = field_value_to_f64(field),
+                _ => {}
+            }
+        }
+
+        if let (Some(ts), Some(dist)) = (timestamp, distance) {
+            distance_samples.push(DistanceSample {
+                record_index,
+                timestamp: ts,
+                distance: dist,
+            });
+        }
+    }
+
+    if distance_samples.len() < 2 {
+        return (vec![None; records.len()], vec![None; records.len()]);
+    }
+
+    let time_intervals: Vec<f64> = distance_samples
+        .windows(2)
+        .map(|window| match window {
+            [first, second] => (second.timestamp - first.timestamp).max(0.0),
+            _ => 0.0,
+        })
+        .collect();
+
+    let mut speeds: Vec<f64> = Vec::new();
+    for window in distance_samples.windows(2) {
+        if let [first, second] = window {
+            let dt = second.timestamp - first.timestamp;
+            let dd = second.distance - first.distance;
+            if dt > 0.0 {
+                speeds.push(dd.max(0.0) / dt);
+            } else {
+                speeds.push(0.0);
+            }
+        }
+    }
+
+    let smoothed_speeds = smooth_speed_window(&speeds, SPEED_SMOOTHING_WINDOW);
+    let smoothed_distances =
+        reconstruct_distance_series(&distance_samples, &smoothed_speeds, &time_intervals);
+
+    let mut record_speeds: Vec<Option<f64>> = vec![None; records.len()];
+    let mut record_distances: Vec<Option<f64>> = vec![None; records.len()];
+
+    for (sample_idx, sample) in distance_samples.iter().enumerate().skip(1) {
+        if let Some(speed) = smoothed_speeds.get(sample_idx - 1).copied() {
+            record_speeds[sample.record_index] = Some(speed);
+        }
+    }
+
+    for (sample_idx, sample) in distance_samples.iter().enumerate() {
+        if let Some(distance) = smoothed_distances.get(sample_idx).copied() {
+            record_distances[sample.record_index] = Some(distance);
+        }
+    }
+
+    (record_speeds, record_distances)
 }
 
 pub fn reencode_fit_with_section(

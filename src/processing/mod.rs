@@ -28,18 +28,14 @@ pub fn process_fit_bytes(
     options: &ProcessingOptions,
 ) -> Result<ProcessedFit, FitProcessError> {
     let parsed = parse_fit(bytes)?;
-    let derived = derive_workout_data(&parsed.records, options);
-
-    let filtered_records = to_display_records(&parsed.records, options);
-
-    let processed_data_section = preprocess_data_section(
-        &parsed.data_section,
-        options,
-        &derived.record_speeds,
-        &derived.record_distances,
-    )?;
+    let processed_data_section =
+        preprocess_data_section(&parsed.data_section, &parsed.records, options)?;
 
     let processed_bytes = reencode_fit_with_section(&parsed, processed_data_section)?;
+    let processed = parse_fit(&processed_bytes)?;
+    let derived = derive_workout_data(&processed.records, options);
+
+    let filtered_records = to_display_records(&processed.records, options);
 
     Ok(ProcessedFit {
         records: filtered_records,

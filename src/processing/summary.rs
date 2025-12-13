@@ -6,10 +6,10 @@ use fitparser::FitDataRecord;
 use std::convert::TryInto;
 
 #[derive(Debug, Clone)]
-struct DistanceSample {
-    record_index: usize,
-    timestamp: f64,
-    distance: f64,
+pub(crate) struct DistanceSample {
+    pub(crate) record_index: usize,
+    pub(crate) timestamp: f64,
+    pub(crate) distance: f64,
 }
 
 /// Convert FIT fields into derived metrics and optional smoothed series.
@@ -115,22 +115,6 @@ pub fn derive_workout_data(
         Some(heart_rates.iter().sum::<f64>() / heart_rates.len() as f64)
     };
 
-    let mut record_speeds: Vec<Option<f64>> = vec![None; records.len()];
-    let mut record_distances: Vec<Option<f64>> = vec![None; records.len()];
-    if options.smooth_speed {
-        for (sample_idx, sample) in distance_samples.iter().enumerate().skip(1) {
-            if let Some(speed) = speeds.get(sample_idx - 1).copied() {
-                record_speeds[sample.record_index] = Some(speed);
-            }
-        }
-
-        for (sample_idx, sample) in distance_samples.iter().enumerate() {
-            if let Some(distance) = distance_series.get(sample_idx).copied() {
-                record_distances[sample.record_index] = Some(distance);
-            }
-        }
-    }
-
     DerivedWorkoutData {
         summary: WorkoutSummary {
             duration_seconds,
@@ -143,8 +127,6 @@ pub fn derive_workout_data(
             heart_rate_mean,
             heart_rate_max,
         },
-        record_speeds,
-        record_distances,
     }
 }
 
@@ -188,7 +170,7 @@ fn derive_speed_mean(
     None
 }
 
-fn field_value_to_f64(field: &FitDataField) -> Option<f64> {
+pub(crate) fn field_value_to_f64(field: &FitDataField) -> Option<f64> {
     field.value().clone().try_into().ok().or_else(|| {
         field
             .to_string()
@@ -214,7 +196,7 @@ fn compute_distance_based_speeds(distance_samples: &[DistanceSample]) -> Vec<f64
     speeds
 }
 
-fn reconstruct_distance_series(
+pub(crate) fn reconstruct_distance_series(
     distance_samples: &[DistanceSample],
     smoothed_speeds: &[f64],
     intervals: &[f64],
@@ -241,7 +223,7 @@ fn reconstruct_distance_series(
     distances
 }
 
-fn smooth_speed_window(speeds: &[f64], window_size: usize) -> Vec<f64> {
+pub(crate) fn smooth_speed_window(speeds: &[f64], window_size: usize) -> Vec<f64> {
     if window_size == 0 || speeds.is_empty() {
         return speeds.to_vec();
     }

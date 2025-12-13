@@ -4,7 +4,7 @@ use fitparser::FitDataRecord;
 /// Build UI-friendly records while honoring filtering options.
 pub fn to_display_records(
     records: &[FitDataRecord],
-    options: &ProcessingOptions,
+    _options: &ProcessingOptions,
 ) -> Vec<DisplayRecord> {
     records
         .iter()
@@ -13,7 +13,6 @@ pub fn to_display_records(
             fields: record
                 .fields()
                 .iter()
-                .filter(|field| !should_skip_field(field.name(), options))
                 .map(|field| DisplayField {
                     name: field.name().to_string(),
                     value: field.to_string(),
@@ -21,11 +20,4 @@ pub fn to_display_records(
                 .collect(),
         })
         .collect()
-}
-
-fn should_skip_field(field_name: &str, options: &ProcessingOptions) -> bool {
-    if !options.remove_speed_fields {
-        return false;
-    }
-    matches!(field_name, "speed" | "enhanced_speed")
 }
