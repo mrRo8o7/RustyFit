@@ -102,7 +102,7 @@ mod tests {
         let processed = process_fit_bytes(&bytes, &ProcessingOptions::default())
             .expect("processing should succeed");
 
-        let rendered = render_processed_records(&processed);
+        let rendered = render_processed_records(&processed, "/download/test");
 
         assert!(rendered.contains("Workout Overview"));
         assert!(rendered.contains("Download processed FIT"));
