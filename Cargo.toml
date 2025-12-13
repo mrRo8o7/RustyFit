@@ -14,7 +14,7 @@ tower = { version = "0.4", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 fitparser = { git = "https://github.com/mrRo8o7/fitparse-rs", branch = "enable-writing-FIT-files" }
-base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
