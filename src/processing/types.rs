@@ -14,21 +14,6 @@ pub struct DisplayRecord {
     pub fields: Vec<DisplayField>,
 }
 
-/// Preprocessed representation of a FIT record used for both summarization and display.
-#[derive(Debug, Clone)]
-pub struct PreprocessedRecord {
-    pub message_type: String,
-    pub fields: Vec<PreprocessedField>,
-}
-
-/// Field data captured during preprocessing, retaining parsed numeric values when present.
-#[derive(Debug, Clone)]
-pub struct PreprocessedField {
-    pub name: String,
-    pub value: String,
-    pub numeric_value: Option<f64>,
-}
-
 /// Processed FIT output returned to the web handler.
 #[derive(Debug, Clone)]
 pub struct ProcessedFit {
@@ -66,12 +51,6 @@ pub struct WorkoutSummary {
 /// Default window size (in samples) for moving-average speed smoothing.
 pub const SPEED_SMOOTHING_WINDOW: usize = 5;
 
-/// Decomposed pieces of the original FIT file used for later reconstruction.
-#[derive(Debug, Clone)]
-pub struct ParsedFit {
-    pub records: Vec<fitparser::FitDataRecord>,
-}
-
 #[derive(Debug, Default)]
 pub struct DerivedWorkoutData {
     pub summary: WorkoutSummary,
@@ -80,14 +59,12 @@ pub struct DerivedWorkoutData {
 #[derive(Debug)]
 pub enum FitProcessError {
     ParseError(String),
-    InvalidHeader(String),
 }
 
 impl fmt::Display for FitProcessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             FitProcessError::ParseError(msg) => write!(f, "Failed to decode FIT file: {msg}"),
-            FitProcessError::InvalidHeader(msg) => write!(f, "Invalid FIT file: {msg}"),
         }
     }
 }

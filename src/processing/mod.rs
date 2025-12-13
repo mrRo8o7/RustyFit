@@ -11,9 +11,74 @@ use summary::derive_workout_data;
 
 pub use parse::parse_fit;
 pub use types::{
-    DisplayField, DisplayRecord, FitProcessError, ParsedFit, ProcessedFit, ProcessingOptions,
-    WorkoutSummary,
+    DisplayField, DisplayRecord, FitProcessError, ProcessedFit, ProcessingOptions, WorkoutSummary,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::templates::render_processed_records;
+
+    fn fixture_bytes() -> Vec<u8> {
+        std::fs::read("fixtures/activity.fit").expect("fixture should be present")
+    }
+
+    #[test]
+    fn round_trip_preserves_record_kinds() {
+        let bytes = fixture_bytes();
+
+        let processed = process_fit_bytes(&bytes, &ProcessingOptions::default())
+            .expect("processing should succeed");
+
+        let original = parse_fit(&bytes).expect("fixture should decode");
+        let redecoded = parse_fit(&processed.processed_bytes).expect("processed bytes decode");
+
+        assert_eq!(original.len(), redecoded.len());
+        assert!(
+            original
+                .iter()
+                .zip(&redecoded)
+                .all(|(first, second)| first.kind() == second.kind())
+        );
+    }
+
+    #[test]
+    fn processed_download_remains_decodable_without_speed_fields() {
+        let bytes = fixture_bytes();
+
+        let processed = process_fit_bytes(
+            &bytes,
+            &ProcessingOptions {
+                remove_speed_fields: true,
+                smooth_speed: false,
+            },
+        )
+        .expect("processing should succeed");
+
+        assert!(
+            processed
+                .records
+                .iter()
+                .flat_map(|record| &record.fields)
+                .all(|field| field.name != "speed" && field.name != "enhanced_speed")
+        );
+
+        let download = parse_fit(&processed.processed_bytes).expect("download should decode");
+        assert_eq!(download.len(), processed.records.len());
+    }
+
+    #[test]
+    fn rendered_output_includes_summary_and_download_link() {
+        let bytes = fixture_bytes();
+        let processed = process_fit_bytes(&bytes, &ProcessingOptions::default())
+            .expect("processing should succeed");
+
+        let rendered = render_processed_records(&processed);
+
+        assert!(rendered.contains("Workout Overview"));
+        assert!(rendered.contains("Download processed FIT"));
+    }
+}
 
 /// Decode a FIT payload, preprocess it once, and feed downstream derivation.
 ///
@@ -30,13 +95,13 @@ pub fn process_fit_bytes(
     options: &ProcessingOptions,
 ) -> Result<ProcessedFit, FitProcessError> {
     let parsed = parse_fit(bytes)?;
-    let (processed_records, preprocessed_records) = preprocess_fit(&parsed, options)?;
+    let processed_records = preprocess_fit(&parsed, options)?;
 
     let processed_bytes = encode_records(&processed_records)
         .map_err(|err| FitProcessError::ParseError(err.to_string()))?;
-    let derived = derive_workout_data(&preprocessed_records);
+    let derived = derive_workout_data(&processed_records);
 
-    let filtered_records = to_display_records(&preprocessed_records);
+    let filtered_records = to_display_records(&processed_records);
 
     Ok(ProcessedFit {
         records: filtered_records,

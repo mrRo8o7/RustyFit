@@ -1,17 +1,18 @@
-use crate::processing::types::{DisplayField, DisplayRecord, PreprocessedRecord};
+use crate::processing::types::{DisplayField, DisplayRecord};
+use fitparser::FitDataRecord;
 
-/// Convert preprocessed records into UI-friendly display records.
-pub fn to_display_records(records: &[PreprocessedRecord]) -> Vec<DisplayRecord> {
+/// Convert processed records into UI-friendly display records.
+pub fn to_display_records(records: &[FitDataRecord]) -> Vec<DisplayRecord> {
     records
         .iter()
         .map(|record| DisplayRecord {
-            message_type: record.message_type.clone(),
+            message_type: format!("{:?}", record.kind()),
             fields: record
-                .fields
+                .fields()
                 .iter()
                 .map(|field| DisplayField {
-                    name: field.name.clone(),
-                    value: field.value.clone(),
+                    name: field.name().to_string(),
+                    value: field.to_string(),
                 })
                 .collect(),
         })

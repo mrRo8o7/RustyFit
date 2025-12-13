@@ -1,5 +1,5 @@
-use crate::processing::types::{DerivedWorkoutData, PreprocessedRecord, WorkoutSummary};
-use fitparser::FitDataField;
+use crate::processing::types::{DerivedWorkoutData, WorkoutSummary};
+use fitparser::{FitDataField, FitDataRecord};
 use std::convert::TryInto;
 
 #[derive(Debug, Clone)]
@@ -10,7 +10,7 @@ pub(crate) struct DistanceSample {
 }
 
 /// Convert FIT fields into derived metrics and optional smoothed series.
-pub fn derive_workout_data(records: &[PreprocessedRecord]) -> DerivedWorkoutData {
+pub fn derive_workout_data(records: &[FitDataRecord]) -> DerivedWorkoutData {
     let mut timestamps: Vec<f64> = Vec::new();
     let mut workout_type: Option<String> = None;
     let mut distance_samples: Vec<DistanceSample> = Vec::new();
@@ -20,26 +20,26 @@ pub fn derive_workout_data(records: &[PreprocessedRecord]) -> DerivedWorkoutData
         let mut timestamp: Option<f64> = None;
         let mut distance: Option<f64> = None;
 
-        for field in &record.fields {
-            match field.name.as_str() {
+        for field in record.fields() {
+            match field.name() {
                 "timestamp" => {
-                    if let Some(value) = field.numeric_value {
+                    if let Some(value) = field_value_to_f64(field) {
                         timestamp = Some(value);
                         timestamps.push(value);
                     }
                 }
                 "distance" => {
-                    if let Some(value) = field.numeric_value {
+                    if let Some(value) = field_value_to_f64(field) {
                         distance = Some(value);
                     }
                 }
                 "heart_rate" => {
-                    if let Some(value) = field.numeric_value {
+                    if let Some(value) = field_value_to_f64(field) {
                         heart_rates.push(value);
                     }
                 }
                 "sport" | "workout_type" if workout_type.is_none() => {
-                    let display = field.value.clone();
+                    let display = field.to_string();
                     if !display.is_empty() {
                         workout_type = Some(display);
                     }
