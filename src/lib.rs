@@ -67,3 +67,35 @@ async fn handle_upload(mut multipart: Multipart) -> impl IntoResponse {
 fn render_processing_error(error: FitProcessError) -> axum::response::Response {
     (StatusCode::BAD_REQUEST, error.to_string()).into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn landing_page_responds() {
+        let app = build_app();
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn upload_without_file_is_rejected() {
+        let app = build_app();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/upload")
+            .header("content-type", "multipart/form-data; boundary=--boundary")
+            .body(Body::from("----boundary--"))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}

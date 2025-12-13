@@ -38,7 +38,7 @@ The FIT protocol stores binary data with a small header, a stream of definition 
 +-----------------------------------------------------------------+
 ```
 
-1. `parse_fit` enforces basic FIT layout: the first byte declares the header size, the next four bytes declare the data payload length, and the file ends with a two-byte CRC.
+1. `fitparse::from_bytes` enforces basic FIT layout: the first byte declares the header size, the next four bytes declare the data payload length, and the file ends with a two-byte CRC.
 2. The parsed `FitDataRecord`s are converted into human-readable `DisplayRecord`s for the UI.
 3. Speed filtering and smoothing operate on decoded `FitDataRecord`s so we can drop or adjust fields without manually rewriting FIT headers.
 4. The updated records are re-encoded with `fitparser::encode_records`, which rebuilds the FIT header and CRC for us.

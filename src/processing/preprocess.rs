@@ -1,10 +1,7 @@
 use crate::processing::summary::{
     DistanceSample, field_value_to_f64, reconstruct_distance_series, smooth_speed_window,
 };
-use crate::processing::types::{
-    FitProcessError, ParsedFit, PreprocessedField, PreprocessedRecord, ProcessingOptions,
-    SPEED_SMOOTHING_WINDOW,
-};
+use crate::processing::types::{FitProcessError, ProcessingOptions, SPEED_SMOOTHING_WINDOW};
 use fitparser::profile::MesgNum;
 use fitparser::{FitDataField, FitDataRecord, Value};
 
@@ -16,14 +13,11 @@ pub struct RecordOverrides {
 
 /// Preprocess FIT data to align with downstream derive/display steps.
 pub fn preprocess_fit(
-    parsed: &ParsedFit,
+    records: &[FitDataRecord],
     options: &ProcessingOptions,
-) -> Result<(Vec<FitDataRecord>, Vec<PreprocessedRecord>), FitProcessError> {
-    let overrides = compute_record_overrides(&parsed.records, options);
-    let processed_records = apply_overrides_and_filters(&parsed.records, &overrides, options);
-    let records_for_display = build_preprocessed_records(&processed_records);
-
-    Ok((processed_records, records_for_display))
+) -> Result<Vec<FitDataRecord>, FitProcessError> {
+    let overrides = compute_record_overrides(records, options);
+    Ok(apply_overrides_and_filters(records, &overrides, options))
 }
 
 fn apply_overrides_and_filters(
@@ -87,28 +81,6 @@ fn apply_overrides_and_filters(
             }
 
             updated
-        })
-        .collect()
-}
-
-fn build_preprocessed_records(records: &[FitDataRecord]) -> Vec<PreprocessedRecord> {
-    records
-        .iter()
-        .map(|record| {
-            let mut fields: Vec<PreprocessedField> = Vec::new();
-
-            for field in record.fields() {
-                fields.push(PreprocessedField {
-                    name: field.name().to_string(),
-                    value: field.to_string(),
-                    numeric_value: field_value_to_f64(field),
-                });
-            }
-
-            PreprocessedRecord {
-                message_type: format!("{:?}", record.kind()),
-                fields,
-            }
         })
         .collect()
 }
